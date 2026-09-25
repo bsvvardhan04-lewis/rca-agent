@@ -1,0 +1,25 @@
+# Virtualenv
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Secrets
+.env
+
+# Generated evidence data. Regenerate with:
+#   python scripts/seed_demo.py --all
+# Not committed because timestamps anchor to generation time, so a committed
+# copy is stale (and wrong) for anyone who clones it later.
+data/
+
+# Generated reports
+reports/*.md
+reports/*.html
+reports/*.json
+!reports/.gitkeep
+
+.DS_Store
