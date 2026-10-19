@@ -140,7 +140,7 @@ class RCAAgent:
         if strategy == "guided":
             return self._guided(incident, triage, ctx, usage)
         if strategy == "agentic":
-            return self._agentic(incident, triage, ctx, usage)
+            return self._agentic(incident, triage, ctx, usage) + self._ensure_coverage(ctx)
 
         # auto
         try:
@@ -148,7 +148,62 @@ class RCAAgent:
         except _ModelNotUsingTools as exc:
             self.on_event("warn", f"{exc} Falling back to the guided sequence.")
             return self._guided(incident, triage, ctx, usage)
-        return findings
+        return findings + self._ensure_coverage(ctx)
+
+    # -- coverage guard ----------------------------------------------------
+
+    # An evidence source the investigator never queried is a hole in the report,
+    # not a finding: "no change found" must not mean "never looked".
+    COVERAGE = (
+        ("logs", ("log_volume", "search_logs")),
+        ("changes", ("list_recent_changes",)),
+        ("alerts", ("list_alerts",)),
+    )
+
+    def _ensure_coverage(self, ctx: ToolContext) -> str:
+        """Query, with default settings, any evidence source the model skipped.
+
+        Found by running the full evaluation on a 3B model: three of four runs
+        made a single tool call and then wrote a summary, because the loop ends
+        the moment the model stops asking for tools. No change list was ever
+        read, so no decoy PR was ever considered and the report cited nothing.
+        Whether to keep looking is the model's call; whether to look at *all
+        three sources at all* is not.
+
+        Returns text to append to the findings (empty when nothing was missing).
+        """
+        called = {line.split("(", 1)[0] for line in ctx.call_log}
+        missing = [name for name, tools in self.COVERAGE if not called.intersection(tools)]
+        if not missing:
+            return ""
+
+        self.on_event(
+            "warn",
+            f"Coverage check: the investigator never queried {', '.join(missing)}; "
+            "fetching them with default settings.",
+        )
+        tools = {t.name: t for t in build_tools(ctx)}
+        gathered: list[str] = []
+
+        def run(name: str, arguments: dict[str, Any]) -> None:
+            out = self._safe_call(tools[name], arguments)
+            self.on_event("tool", f"{name}({_short(arguments)}) [coverage check]")
+            gathered.append(f"{name}: {out[:700]}")
+
+        if "logs" in missing:
+            run("search_logs", {"levels": "ERROR,WARN", "limit": 15})
+        if "changes" in missing:
+            run("list_recent_changes", {})
+            for item in ctx.ledger.by_kind("change")[:3]:
+                run("get_change_detail", {"change_id": item.summary.split(" ", 1)[0]})
+        if "alerts" in missing:
+            run("list_alerts", {})
+
+        return (
+            "\n\nCoverage check (run by code because the investigator skipped "
+            f"{', '.join(missing)}; default settings, results are also in the ledger):\n"
+            + "\n".join(gathered)
+        )
 
     # -- agentic -----------------------------------------------------------
 

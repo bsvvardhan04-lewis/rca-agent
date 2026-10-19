@@ -350,6 +350,33 @@ Re-run the seeder when the data goes stale — it anchors timestamps to the curr
 
 ---
 
+
+### Measured results (llama3.2:3b, CPU only)
+
+Run with `python scripts/evaluate.py` and `python scripts/baseline_single_call.py`; the JSON for
+each run is written to `reports/` (generated output, so not committed). Four scenarios, scored by the same eight checks.
+
+| Configuration | Passed | Mean score | Citations valid | Time / run |
+|---|---|---|---|---|
+| Single model call, no tools (baseline) | 0 / 4 | 48% | 0 / 4 | 107 s |
+| Pipeline, before the coverage guard | 0 / 4 | 42% | 1 / 4 | 268 s |
+| Pipeline, with the coverage guard | 1 / 4 | 46% | 4 / 4 | 198 s |
+
+A repeat run with the guard gave identical results. A first run of that sweep was discarded
+for timing (the laptop slept mid-run and recorded durations of 1,538 s and 8,144 s); its
+quality results matched the clean run exactly.
+
+What this does and does not show. The first full sweep found that three of four runs made a
+single tool call, because the loop ends when the model stops asking, so no change list was ever
+read. The coverage guard fixes that: code now fetches any evidence source the model skipped
+(`RCAAgent._ensure_coverage`). It improved evidence use (4 to 7 tool calls, every citation
+valid) but **not accuracy**: on this 3B model the pipeline is still level with a single call
+(46% vs 48%), and with the change list in hand it blamed a decoy PR on one scenario, which is
+the newest-PR trap the scenarios exist to catch. "Cause right" is high for the baseline only
+because three of four scenarios have no culprit, so blaming nothing is correct. The design
+assumes a 32B to 70B model; that has not been run. Four scenarios, written by us, is a small
+and non-independent test.
+
 ## Swapping in real data sources
 
 Everything file-backed sits behind a protocol in [`rca/sources/base.py`](rca/sources/base.py).

@@ -179,8 +179,12 @@ def test_iteration_ceiling_is_enforced(sources, settings, incident, triage):
     )
     report = agent.investigate(incident)
 
-    assert len(report.investigation_log) == 2
+    # The ceiling caps the *model's* loop. The coverage guard then adds a small,
+    # fixed number of code-run calls for the sources the model never touched,
+    # so count the model's own calls rather than the whole log.
+    assert sum(line.startswith("list_alerts") for line in report.investigation_log) == 2
     assert any("ceiling" in m for k, m in events if k == "warn")
+    assert any("Coverage check" in m for k, m in events if k == "warn")
 
 
 def test_usage_is_accumulated_across_phases(sources, settings, incident, triage):
@@ -341,3 +345,56 @@ def test_synthesis_replaces_the_models_timeline_with_the_evidences(sources, sett
     assert report.analysis.timeline, "the retrieved evidence has timestamps"
     assert all(line.rstrip().endswith("]") for line in report.analysis.timeline)
     assert any("PR-4821 deployed" in line for line in report.analysis.timeline)
+
+
+# -- coverage guard: a source the model never queried is fetched by code ------
+
+
+def test_a_model_that_makes_one_tool_call_still_gets_every_source_read(sources, settings, incident, triage):
+    """Found by the full evaluation on a 3B model: three of four runs made one
+    tool call and then wrote a summary, so no change list was ever read."""
+    events: list = []
+    one_call = [[("log_volume", {"levels": "ERROR", "bucket_minutes": 15})]]
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]), script=one_call, events=events)
+    report = agent.investigate(incident)
+
+    kinds = {item.kind for item in report.evidence}
+    assert {"change", "alert"} <= kinds, "the skipped sources must end up in the ledger"
+    assert any(k == "warn" and "Coverage check" in m for k, m in events)
+    assert any("list_recent_changes" in line for line in report.investigation_log)
+    assert any("list_alerts" in line for line in report.investigation_log)
+
+
+def test_the_guard_also_reads_the_change_details_it_just_listed(sources, settings, incident, triage):
+    """The mechanism lives in a PR's description, not in the list line."""
+    one_call = [[("log_volume", {"levels": "ERROR"})]]
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]), script=one_call)
+    report = agent.investigate(incident)
+    assert any("get_change_detail" in line for line in report.investigation_log)
+
+
+def test_a_model_that_covers_every_source_is_left_alone(sources, settings, incident, triage):
+    events: list = []
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1", "C1", "A1"]), events=events)
+    agent.investigate(incident)
+    assert not any("Coverage check" in m for _k, m in events)
+
+
+def test_guided_strategy_needs_no_coverage_check(sources, settings, incident, triage):
+    events: list = []
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]), script=None,
+                          strategy="guided", events=events)
+    agent.investigate(incident)
+    assert not any("Coverage check" in m for _k, m in events)
+
+
+def test_the_guard_only_fetches_what_was_skipped(sources, settings, incident, triage):
+    """A model that read logs and alerts but never looked at changes should get
+    exactly the change list, not a second copy of everything."""
+    script = [[("search_logs", {"levels": "ERROR", "limit": 5}), ("list_alerts", {})]]
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]), script=script)
+    report = agent.investigate(incident)
+    log = report.investigation_log
+    assert sum("list_alerts" in line for line in log) == 1, "alerts were already read"
+    assert sum("search_logs" in line for line in log) == 1, "logs were already read"
+    assert any("list_recent_changes" in line for line in log)
