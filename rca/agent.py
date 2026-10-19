@@ -35,6 +35,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+from rca.calibration import cap_overconfidence
 from rca.config import Settings, settings as default_settings
 from rca.evidence import EvidenceLedger
 from rca.llm import LLMClient, LLMError, ToolSpec, Usage, build_client, complete_structured
@@ -473,6 +474,11 @@ class RCAAgent:
                 setattr(hypothesis, field_name, kept)
         if dropped:
             self.on_event("warn", f"Dropped {dropped} citation(s) that did not resolve.")
+
+        # After the citation pass on purpose: a hypothesis whose every citation
+        # was just dropped has no support left, and should not stay "very likely".
+        for note in cap_overconfidence(analysis):
+            self.on_event("warn", note)
 
         return analysis
 

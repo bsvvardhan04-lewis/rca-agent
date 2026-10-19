@@ -313,3 +313,19 @@ def test_a_broken_triage_window_falls_back_instead_of_crashing(
 
     assert any("falling back" in m for k, m in events if k == "warn")
     assert report.investigation_log
+
+
+# -- calibration guard is actually wired into synthesis -----------------------
+
+
+def test_synthesis_lowers_an_unearned_very_likely(sources, settings, incident, triage):
+    """`analysis()` is a single hypothesis at 0.9 - nothing else was considered.
+    The rule is only worth having if synthesis really applies it, and says so."""
+    events: list = []
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]), events=events)
+    report = agent.investigate(incident)
+
+    top = report.analysis.hypotheses[0]
+    assert top.confidence == 0.7
+    assert "lowered" in top.reasoning
+    assert any(kind == "warn" and "Confidence lowered" in msg for kind, msg in events)

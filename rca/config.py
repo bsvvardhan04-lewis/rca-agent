@@ -96,6 +96,11 @@ class Settings:
     git_repo: str = field(default_factory=lambda: _env("RCA_GIT_REPO"))
     github_repo: str = field(default_factory=lambda: _env("RCA_GITHUB_REPO"))
 
+    # Optional bearer token for the evaluator-facing routes (POST /chat, /v1/*).
+    # Unset is open, which is right on localhost. `public_app` refuses to answer
+    # until this is set.
+    chat_token: str = field(default_factory=lambda: _env("RCA_CHAT_TOKEN"))
+
     # -- guard rails ----------------------------------------------------
     max_tool_iterations: int = field(
         default_factory=lambda: _int_env("RCA_MAX_TOOL_ITERATIONS", 20)

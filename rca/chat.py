@@ -150,6 +150,17 @@ class ReportChat:
 
         out.append("## Evidence ledger - these are the ONLY citable IDs")
         if r.evidence:
+            # State the totals outright. "Was that the only change?" is a natural
+            # question, and a small model asked it will invent a second change
+            # rather than count the list above it.
+            kinds = {"log": 0, "change": 0, "alert": 0}
+            for item in r.evidence:
+                kinds[item.kind] += 1
+            out.append(
+                f"Totals: {kinds['log']} log line(s), {kinds['change']} code change(s), "
+                f"{kinds['alert']} alert(s). Nothing else was retrieved, so there is no "
+                "evidence of any other change, alert or log line."
+            )
             out.extend(item.one_line() for item in r.evidence)
         else:
             out.append("(no evidence was retrieved - you may cite nothing)")

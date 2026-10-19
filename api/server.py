@@ -18,9 +18,11 @@ worker process rather than a BackgroundTask.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
+import time
 import traceback
 import uuid
 from collections import defaultdict
@@ -28,12 +30,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel, Field
 
 from rca.agent import RCAAgent
-from rca.chat import ReportChat, suggested_questions
+from rca.chat import ChatAnswer, ReportChat, suggested_questions
 from rca.config import settings
 from rca.llm import LLMError, build_client
 from rca.models import ChatTurn, IncidentReport, RCAReport, utcnow
@@ -131,7 +135,7 @@ def seed_demo_job() -> Job | None:
 
 @app.on_event("startup")
 def _maybe_seed() -> None:
-    if os.environ.get("RCA_SEED_DEMO", "").strip().lower() in {"1", "true", "yes", "on"}:
+    if _flag("RCA_SEED_DEMO"):
         seed_demo_job()
 
 
@@ -174,11 +178,38 @@ class JobAccepted(BaseModel):
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+def health(deep: bool = False) -> dict[str, Any]:
+    """Readiness. `?deep=true` also runs a 4-token generation.
+
+    Listing models only proves the server answers. An interrupted Ollama upgrade
+    once left a server that listed every model and returned HTTP 500 on every
+    generation - shallow health said "ok" the whole time. The deep probe costs a
+    real (small) generation, so it is opt-in rather than what a poller hits.
+    """
     bundle = build_sources()
-    reachable, detail = build_client(settings).health()
+    client = build_client(settings)
+    reachable, detail = client.health()
+
+    generation_ok: bool | None = None
+    generation_detail = ""
+    if deep and reachable:
+        try:
+            client.chat(
+                system="Reply with the single word OK.",
+                messages=[{"role": "user", "content": "ping"}],
+                temperature=0.0,
+                max_tokens=4,
+            )
+            generation_ok = True
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            generation_ok = False
+            generation_detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+
+    healthy = reachable and generation_ok is not False
     return {
-        "status": "ok" if reachable else "degraded",
+        "status": "ok" if healthy else "degraded",
+        "generation_ok": generation_ok,
+        "generation_detail": generation_detail,
         "model": settings.model,
         "model_server": settings.llm_base_url,
         "model_server_reachable": reachable,
@@ -363,9 +394,92 @@ def reset_chat(job_id: str) -> None:
         job.chat.clear()
 
 
+# --------------------------------------------------------------------------
+# Evaluator-facing chat
+#
+# A generic chatbot evaluator cannot file an incident, wait for a job and fish a
+# job ID out of the result. It has one URL and a message. These routes give it
+# exactly that, in two shapes:
+#
+#   POST /chat                  {"message": ...}  ->  {"reply": ...}
+#   POST /v1/chat/completions   the OpenAI chat format, which most evaluation
+#                               harnesses already speak
+#
+# Both answer about the one standing report (RCA_CHAT_REPORT). Both are
+# stateless for the caller: send the history you want considered with each
+# request and nothing is kept on the server. (`POST /chat` additionally offers a
+# server-side session_id, convenient for testing by hand.)
+#
+# Serving them to anyone but yourself: run `public_app`, not `app`. It carries
+# only these routes - not the job list, not incident filing, not the webhooks -
+# and it refuses to answer until a token is configured.
+# --------------------------------------------------------------------------
+
+evaluator = APIRouter()
+
+MAX_HISTORY = 40
+MAX_CONTENT_CHARS = 4000
+EVALUATOR_MODEL_NAME = "rca-agent"
+
+
+def _flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _check_token(authorization: str | None, x_api_key: str | None, *, public: bool) -> None:
+    expected = settings.chat_token
+    if not expected:
+        if public and not _flag("RCA_PUBLIC_OPEN"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "This endpoint is closed until RCA_CHAT_TOKEN is set. "
+                    "(RCA_PUBLIC_OPEN=1 serves it with no authentication.)"
+                ),
+            )
+        return
+
+    supplied = ""
+    if authorization and authorization.lower().startswith("bearer "):
+        supplied = authorization[7:].strip()
+    elif x_api_key:
+        supplied = x_api_key.strip()
+    # Constant-time compare: the token guards a route that spends the host's CPU.
+    if not hmac.compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid token. Send `Authorization: Bearer <token>`.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def require_token(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    """Local use: open unless RCA_CHAT_TOKEN is set."""
+    _check_token(authorization, x_api_key, public=False)
+
+
+def require_token_public(
+    authorization: str | None = Header(default=None),
+    x_api_key: str | None = Header(default=None),
+) -> None:
+    """Public use: fails closed - no token configured means no answers."""
+    _check_token(authorization, x_api_key, public=True)
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=MAX_CONTENT_CHARS)
+
+
 class SimpleMessage(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None
+    # When given, the call is fully stateless: this is the whole conversation so
+    # far and the server neither reads nor writes a session.
+    history: list[ChatMessage] | None = Field(default=None, max_length=MAX_HISTORY)
 
 
 class SimpleReply(BaseModel):
@@ -373,7 +487,7 @@ class SimpleReply(BaseModel):
     citations: list[str]
     unverified: list[str]
     unsupported_times: list[str] = Field(default_factory=list)
-    session_id: str
+    session_id: str | None = None
     incident_id: str
 
 
@@ -382,7 +496,7 @@ _STANDING: dict[str, RCAReport] = {}
 
 
 def _standing_report() -> RCAReport:
-    """The report `POST /chat` talks about, loaded once from `settings.chat_report`."""
+    """The report the evaluator routes talk about, loaded once from `settings.chat_report`."""
     path = settings.chat_report
     cached = _STANDING.get(str(path))
     if cached is not None:
@@ -404,35 +518,44 @@ def _standing_report() -> RCAReport:
     return report
 
 
-@app.post("/chat", response_model=SimpleReply)
+def _ask(report: RCAReport, message: str, history: list[ChatTurn], *, who: str) -> ChatAnswer:
+    """One grounded answer. A dead model server is a 503, not a crash."""
+    chat = ReportChat(report, client=build_client(settings), settings=settings)
+    try:
+        return chat.answer(message, history)
+    except LLMError as exc:
+        logger.warning("Chat (%s) failed: %s", who, exc)
+        raise HTTPException(
+            status_code=503,
+            detail=f"The model server at {settings.llm_base_url} could not answer: {exc}",
+        ) from exc
+
+
+@evaluator.post("/chat", response_model=SimpleReply)
 def chat_simple(payload: SimpleMessage) -> SimpleReply:
     """Send one message, get one answer. No job ID, no polling.
 
-    The shape a generic chatbot evaluator expects: a URL, a message in, a reply
-    out. The conversation is about the standing report (`RCA_CHAT_REPORT`);
-    pass the returned `session_id` back to keep the thread, omit it to start one.
+    Stateless when `history` is supplied. Otherwise the server keeps the thread
+    under `session_id` (returned; pass it back to continue, omit it to start).
     """
     report = _standing_report()
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="The message is empty.")
 
-    session_id = payload.session_id or uuid.uuid4().hex[:12]
-    with CHAT_LOCKS[f"session:{session_id}"]:
-        history = SESSIONS.setdefault(session_id, [])
-        chat = ReportChat(report, client=build_client(settings), settings=settings)
-        try:
-            result = chat.answer(message, history)
-        except LLMError as exc:
-            logger.warning("Chat session %s failed: %s", session_id, exc)
-            raise HTTPException(
-                status_code=503,
-                detail=f"The model server at {settings.llm_base_url} could not answer: {exc}",
-            ) from exc
-        history.append(ChatTurn(role="user", content=message))
-        history.append(
-            ChatTurn(role="assistant", content=result.text, citations=result.citations)
-        )
+    if payload.history is not None:
+        turns = [ChatTurn(role=m.role, content=m.content) for m in payload.history]
+        result = _ask(report, message, turns, who="stateless")
+        session_id = None
+    else:
+        session_id = payload.session_id or uuid.uuid4().hex[:12]
+        with CHAT_LOCKS[f"session:{session_id}"]:
+            thread = SESSIONS.setdefault(session_id, [])
+            result = _ask(report, message, thread, who=f"session {session_id}")
+            thread.append(ChatTurn(role="user", content=message))
+            thread.append(
+                ChatTurn(role="assistant", content=result.text, citations=result.citations)
+            )
 
     return SimpleReply(
         reply=result.text,
@@ -442,6 +565,144 @@ def chat_simple(payload: SimpleMessage) -> SimpleReply:
         session_id=session_id,
         incident_id=report.incident.id,
     )
+
+
+class OAIMessage(BaseModel):
+    role: str
+    content: str | list[dict[str, Any]] | None = None
+
+
+class OAIRequest(BaseModel):
+    model: str | None = None
+    messages: list[OAIMessage] = Field(min_length=1, max_length=MAX_HISTORY * 2)
+    stream: bool = False
+    # temperature, max_tokens, top_p and the rest are accepted and ignored: the
+    # service fixes its own sampling so an answer does not depend on the caller.
+
+
+def _oai_text(content: str | list[dict[str, Any]] | None) -> str:
+    """Message content as text. Newer clients send a list of typed parts."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        str(part.get("text", ""))
+        for part in content
+        if isinstance(part, dict) and part.get("type") in (None, "text")
+    )
+
+
+@evaluator.post("/v1/chat/completions")
+def chat_completions(payload: OAIRequest) -> dict[str, Any]:
+    """OpenAI-compatible, non-streaming, stateless.
+
+    The caller's `system` / `developer` / `tool` messages are dropped on
+    purpose: the grounding and scope rules are this service's, and a request
+    must not be able to replace them. Only user and assistant turns count, and
+    the last must be a user turn.
+    """
+    if payload.stream:
+        raise HTTPException(status_code=400, detail="stream=true is not supported; send stream=false.")
+
+    turns: list[ChatTurn] = []
+    for message in payload.messages:
+        if message.role not in ("user", "assistant"):
+            continue
+        text = _oai_text(message.content).strip()
+        if not text:
+            continue
+        if len(text) > MAX_CONTENT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"A message is over the {MAX_CONTENT_CHARS}-character limit.",
+            )
+        turns.append(ChatTurn(role=message.role, content=text))  # type: ignore[arg-type]
+
+    if not turns or turns[-1].role != "user":
+        raise HTTPException(status_code=400, detail="The last message must be a non-empty user message.")
+
+    report = _standing_report()
+    result = _ask(report, turns[-1].content, turns[:-1], who="openai")
+    usage = result.usage
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": payload.model or EVALUATOR_MODEL_NAME,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": result.text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "total_tokens": usage.total,
+        },
+        # Not part of the OpenAI schema; clients that do not know it ignore it.
+        "rca": {
+            "incident_id": report.incident.id,
+            "underlying_model": settings.model,
+            "citations": result.citations,
+            "unverified": result.unresolved,
+            "unsupported_times": result.unsupported_times,
+        },
+    }
+
+
+@evaluator.get("/v1/models")
+def list_models() -> dict[str, Any]:
+    """Many OpenAI-format clients list models first as a connectivity check."""
+    return {
+        "object": "list",
+        "data": [
+            {"id": EVALUATOR_MODEL_NAME, "object": "model", "created": 0, "owned_by": "team-7"}
+        ],
+    }
+
+
+async def _openai_style_errors(request: Request, exc: StarletteHTTPException) -> Response:
+    """Under /v1/, errors use OpenAI's `{"error": {...}}` envelope.
+
+    OpenAI-format clients look for that key to show a useful message; without it
+    they report only a bare status code.
+    """
+    if request.url.path.startswith("/v1/"):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "message": str(exc.detail),
+                    "type": "invalid_request_error" if exc.status_code < 500 else "server_error",
+                    "code": exc.status_code,
+                }
+            },
+            headers=getattr(exc, "headers", None),
+        )
+    return await http_exception_handler(request, exc)
+
+
+app.include_router(evaluator, dependencies=[Depends(require_token)])
+app.add_exception_handler(StarletteHTTPException, _openai_style_errors)
+
+# What to put on the internet. Run with: uvicorn api.server:public_app --port 8001
+public_app = FastAPI(
+    title="RCA Agent - evaluator endpoints",
+    description="The chat routes only. No incident filing, job list or webhooks.",
+    version=app.version,
+)
+public_app.include_router(evaluator, dependencies=[Depends(require_token_public)])
+public_app.add_exception_handler(StarletteHTTPException, _openai_style_errors)
+
+
+@public_app.get("/health")
+def public_health() -> dict[str, Any]:
+    """Liveness for whoever is checking the tunnel. Reveals nothing internal."""
+    reachable, _detail = build_client(settings).health()
+    return {"status": "ok" if reachable else "degraded"}
 
 
 @app.get("/chat", include_in_schema=False)

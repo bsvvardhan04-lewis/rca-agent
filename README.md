@@ -122,13 +122,27 @@ ollama pull llama3.2:3b
 ```bash
 RCA_MODEL=llama3.2:3b
 RCA_BASE_URL=http://localhost:11434/v1
-RCA_STRATEGY=guided
+RCA_STRATEGY=auto
 ```
 
-On a CPU-only laptop, use `guided` — one generation instead of twenty. For scale: one full
-`agentic` investigation of INC-1042 on `llama3.2:3b`, CPU only (i5-12500H, no GPU), took
-541 s. A follow-up chat answer takes roughly 10–20 s once the model is loaded; the first
-one after loading can take a minute or more. Measured on one machine, one run — not a benchmark.
+**Which strategy on a CPU-only laptop?** Measured on `llama3.2:3b` (i5-12500H, no GPU) against
+INC-1042, one run each:
+
+| Strategy | Time | Outcome |
+|---|---|---|
+| `agentic` | 541 s | Named PR-4821, the true cause, but with a vague mechanism |
+| `guided` | 645 s* | Gathered more evidence and wrote a better timeline, but blamed the decoy PR-4817 and never named PR-4821 |
+
+\* Run alongside other work, so not a clean timing. Even so, `guided` is not the speed-up it
+looks like: most of the time is the final report-writing generation, not the tool loop.
+A follow-up chat answer takes roughly 10–20 s once the model is loaded; the first one after
+loading can take a minute or more. One incident, one run each - not a benchmark.
+
+**Stated confidence is guarded in code.** Both runs came back at 90%, one of them wrong. A
+hypothesis rated above 0.85 is lowered to 0.70 - and the reason written into its reasoning -
+when it is the only hypothesis considered, cites no support, or has evidence cited against
+it (`rca/calibration.py`). It cannot judge whether a mechanism is well explained, so a
+confident answer with a vague mechanism still gets through.
 
 > **On small models.** Llama 3.2 (1B/3B) technically supports tool calling, but a
 > six-tool loop with a long system prompt is past what it does reliably. It works in
@@ -183,8 +197,10 @@ uvicorn api.server:app --port 8000
 | `GET /jobs/{id}/markdown` | The report, ready to paste onto the ticket |
 | `POST /webhooks/jira` | Accepts a Jira `issue_created` payload (incl. ADF descriptions) |
 | `POST /webhooks/sentry` | Accepts a Sentry issue-alert payload |
-| `GET /health` | Sources, model server reachability, active strategy |
-| `POST /chat` | Ask a question about the standing report: `{"message": "..."}` in, `{"reply": ...}` out |
+| `GET /health` | Sources, model server reachability, active strategy. `?deep=true` also runs a 4-token generation |
+| `POST /chat` | Ask about the standing report: `{"message": "..."}` in, `{"reply": ...}` out. Add `"history": [...]` and it is fully stateless |
+| `POST /v1/chat/completions` | The same, in the OpenAI chat format (non-streaming, stateless) |
+| `GET /v1/models` | One model, `rca-agent`; OpenAI-format clients call this as a connectivity check |
 | `GET/POST/DELETE /jobs/{id}/chat` | The same, scoped to one finished job, with its transcript |
 | `GET /chat` | The chat console (one HTML page, no build step, no CDN) |
 
@@ -228,6 +244,39 @@ useful if they can't be faked:
 | `unverified` | The model cited an evidence ID that does not exist (`[I1]`, `[L99]`). It is rewritten to `[unverified]` in the reply rather than left looking real. |
 | `unsupported_times` | A timestamp in the answer that the *cited* evidence does not contain. Added after a live 3B model attributed a pull-request deploy time to an alert. The reply gets a visible `[Check: …]` note. |
 | scope refusal | Anything not about the incident gets one fixed sentence. Verified on `llama3.2:3b` and `llama3.1:8b`. |
+
+### For an evaluation harness
+
+A generic evaluator has one URL and a message; it cannot file an incident and wait for a
+job. Two stateless shapes cover it — use whichever its config speaks:
+
+```bash
+# plain JSON
+curl -X POST localhost:8000/chat -H "Content-Type: application/json"      -d '{"message": "Why that PR?", "history": []}'
+
+# OpenAI format - works with the openai SDK / any OpenAI-compatible tool
+curl -X POST localhost:8000/v1/chat/completions -H "Content-Type: application/json"      -d '{"model": "rca-agent", "messages": [{"role": "user", "content": "Why that PR?"}]}'
+```
+
+The caller owns the conversation: send the turns you want considered each time and the
+server keeps nothing. Any `system` message in the request is dropped on purpose — the
+grounding and scope rules belong to the service, not to the caller. `stream: true` is
+refused with a clear error; `temperature` and `max_tokens` are ignored. The OpenAI reply
+adds an `rca` object (`citations`, `unverified`, `unsupported_times`) that clients which
+do not know it will ignore.
+
+**Serving it to anyone but yourself.** Do not tunnel the main app: it also lists every
+job and report and accepts incident filing. Run the public app, which carries only the
+chat routes, and give it a token:
+
+```bash
+RCA_CHAT_TOKEN=<long random string> uvicorn api.server:public_app --port 8001
+# callers send:  Authorization: Bearer <token>   (or X-API-Key: <token>)
+```
+
+`public_app` fails closed: with no `RCA_CHAT_TOKEN` it answers 503 to everything
+(`RCA_PUBLIC_OPEN=1` opts out explicitly). The same token also guards these routes on the
+main app when set; unset, the main app stays open for localhost use.
 
 **Known limits, stated plainly.** The checks prove a cited ID *exists* and that stated
 times are *present in what was cited*; they cannot prove a sentence is true, and they do
@@ -350,7 +399,7 @@ scripts/
   scenarios.py      four incidents + their ground truth
   seed_demo.py      writes scenarios to disk
   evaluate.py       runs the sweep and scores it
-tests/              194 tests, no server needed
+tests/              228 tests, no server needed
 ```
 
 ## Configuration
@@ -365,6 +414,8 @@ tests/              194 tests, no server needed
 | `RCA_JSON_SCHEMA` | `true` | Guided decoding; set false for older servers |
 | `RCA_CHAT_REPORT` | `data/demo/report.json` | The report `POST /chat` answers about |
 | `RCA_SEED_DEMO` | off | `1` lists that report as a finished job so the console opens on it |
+| `RCA_CHAT_TOKEN` | unset | Bearer token for `POST /chat` and `/v1/*`. Required by `public_app` |
+| `RCA_PUBLIC_OPEN` | off | `1` lets `public_app` serve with no token (not recommended) |
 | `RCA_MAX_TOOL_ITERATIONS` | `20` | Ceiling on the agentic loop |
 | `RCA_MAX_LOG_LINES` | `60` | Hard cap on lines any one search returns |
 | `RCA_DATA_DIR` | `./data` | |

@@ -384,3 +384,12 @@ def test_an_answer_with_no_times_is_untouched(timed: RCAReport):
     result = ReportChat(timed, client=EchoLLM("Roll it back.\nSources: [C1]")).answer("what now?")
     assert result.unsupported_times == []
     assert result.text == "Roll it back.\nSources: [C1]"
+
+
+def test_context_states_the_totals_so_only_one_change_can_be_counted(chat: ReportChat):
+    """Live: asked 'was it the only change that day?' a 3B model answered 'No,
+    there was another change' against a ledger holding exactly one. Counting is
+    something it will do if the count is on the page."""
+    context = chat.context()
+    assert "Totals: 1 log line(s), 1 code change(s), 1 alert(s)" in context
+    assert "no evidence of any other change" in context
