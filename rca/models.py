@@ -286,3 +286,16 @@ class RCAReport(BaseModel):
     @property
     def top_hypothesis(self) -> Hypothesis | None:
         return self.analysis.hypotheses[0] if self.analysis.hypotheses else None
+
+
+class ChatTurn(BaseModel):
+    """One message in a follow-up conversation about a finished report.
+
+    `citations` is filled only for assistant turns, and only with IDs the
+    evidence ledger could actually resolve.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+    citations: list[str] = Field(default_factory=list)
+    at: datetime = Field(default_factory=utcnow)

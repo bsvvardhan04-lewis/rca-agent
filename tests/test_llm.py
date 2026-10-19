@@ -242,3 +242,87 @@ def test_usage_is_accumulated_across_repair_rounds():
         usage=usage,
     )
     assert usage.prompt_tokens == 200, "both attempts counted"
+
+
+# -- health probe -----------------------------------------------------------
+#
+# health() talks to the real `openai` SDK client, not a scripted LLMClient, so
+# it needs its own doubles rather than tests/fakes.py.
+
+
+class _ModelsList:
+    """Stands in for the object the openai SDK's `models.list()` returns."""
+
+    def __init__(self, data):
+        self.data = data
+
+
+class _ModelRow:
+    def __init__(self, id_: str):
+        self.id = id_
+
+
+class _FakeModelsEndpoint:
+    def __init__(self, result=None, error: Exception | None = None):
+        self._result = result
+        self._error = error
+
+    def list(self):
+        if self._error is not None:
+            raise self._error
+        return self._result
+
+
+class _FakeOpenAI:
+    """Enough of the openai.OpenAI client surface for `health()` to run."""
+
+    def __init__(self, models_endpoint: _FakeModelsEndpoint):
+        self.models = models_endpoint
+
+    def with_options(self, **_kwargs):
+        return self
+
+
+def make_client(models_endpoint: _FakeModelsEndpoint, *, model="qwen2.5:7b"):
+    from rca.llm.openai_compat import OpenAICompatClient
+
+    client = OpenAICompatClient(model=model, base_url="http://localhost:11434/v1")
+    client._client = _FakeOpenAI(models_endpoint)
+    return client
+
+
+def test_health_survives_a_server_with_zero_models_pulled():
+    """A freshly installed Ollama answers `{"data": null}`, not `{"data": []}` -
+    the attribute exists, so a bare `getattr(models, "data", [])` returns the
+    real None instead of its default and iterating over it crashes. This is
+    exactly what a real `ollama serve` with nothing pulled yet returns."""
+    client = make_client(_FakeModelsEndpoint(_ModelsList(data=None)))
+    reachable, detail = client.health()
+    assert reachable is True
+    assert "no models" in detail
+
+
+def test_health_reports_the_serving_model():
+    client = make_client(
+        _FakeModelsEndpoint(_ModelsList(data=[_ModelRow("qwen2.5:7b"), _ModelRow("llama3.2")]))
+    )
+    reachable, detail = client.health()
+    assert reachable is True
+    assert "qwen2.5:7b" in detail
+
+
+def test_health_reports_a_model_mismatch():
+    client = make_client(
+        _FakeModelsEndpoint(_ModelsList(data=[_ModelRow("llama3.2")])), model="qwen2.5:7b"
+    )
+    reachable, detail = client.health()
+    assert reachable is False
+    assert "qwen2.5:7b" in detail
+    assert "llama3.2" in detail
+
+
+def test_health_reports_an_unreachable_server_without_raising():
+    client = make_client(_FakeModelsEndpoint(error=ConnectionError("refused")))
+    reachable, detail = client.health()
+    assert reachable is False
+    assert "unreachable" in detail

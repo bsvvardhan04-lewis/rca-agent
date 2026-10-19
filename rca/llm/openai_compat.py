@@ -151,7 +151,11 @@ class OpenAICompatClient:
         except Exception as exc:  # noqa: BLE001 - reported, not raised
             return False, f"{self.base_url} unreachable ({type(exc).__name__})"
 
-        names = [m.id for m in getattr(models, "data", [])]
+        # An Ollama server with zero models pulled returns `{"data": null}`,
+        # not `{"data": []}` - the attribute exists, so `getattr(..., [])`'s
+        # default never kicks in and `data` comes back None. Fold that into
+        # the same "reachable but no models" case rather than crashing here.
+        names = [m.id for m in (getattr(models, "data", None) or [])]
         if not names:
             return True, f"{self.base_url} reachable, but it lists no models"
         if self.model in names:

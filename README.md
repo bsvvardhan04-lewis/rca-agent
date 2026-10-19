@@ -116,16 +116,19 @@ matters here: the design leans on it.
 
 ```bash
 ollama serve
-ollama pull qwen2.5:7b
+ollama pull llama3.2:3b
 ```
 
 ```bash
-RCA_MODEL=qwen2.5:7b
+RCA_MODEL=llama3.2:3b
 RCA_BASE_URL=http://localhost:11434/v1
 RCA_STRATEGY=guided
 ```
 
-On a CPU-only laptop, use `guided` — one generation instead of twenty.
+On a CPU-only laptop, use `guided` — one generation instead of twenty. For scale: one full
+`agentic` investigation of INC-1042 on `llama3.2:3b`, CPU only (i5-12500H, no GPU), took
+541 s. A follow-up chat answer takes roughly 10–20 s once the model is loaded; the first
+one after loading can take a minute or more. Measured on one machine, one run — not a benchmark.
 
 > **On small models.** Llama 3.2 (1B/3B) technically supports tool calling, but a
 > six-tool loop with a long system prompt is past what it does reliably. It works in
@@ -181,6 +184,9 @@ uvicorn api.server:app --port 8000
 | `POST /webhooks/jira` | Accepts a Jira `issue_created` payload (incl. ADF descriptions) |
 | `POST /webhooks/sentry` | Accepts a Sentry issue-alert payload |
 | `GET /health` | Sources, model server reachability, active strategy |
+| `POST /chat` | Ask a question about the standing report: `{"message": "..."}` in, `{"reply": ...}` out |
+| `GET/POST/DELETE /jobs/{id}/chat` | The same, scoped to one finished job, with its transcript |
+| `GET /chat` | The chat console (one HTML page, no build step, no CDN) |
 
 An investigation takes tens of seconds to minutes — longer than any webhook sender will
 wait — so `POST` returns `202` with a job ID rather than blocking.
@@ -190,6 +196,43 @@ still work, but no investigation can actually run, and a readiness probe should 
 
 > The job store is in-process and non-durable. Fine for one worker and a demo; back it
 > with Redis or a table and move the agent into a worker process for real use.
+
+---
+
+## Follow-up chat
+
+A report is a push; the first thing a developer does with it is argue back — *why that
+PR and not the other? how sure are you? what didn't you check?* The chat answers from the
+evidence the investigation already collected. It has no tools and no source access, so it
+cannot contradict the report on screen.
+
+```bash
+# 1. Save a finished report (this is what the chat will be about)
+python -m rca.cli investigate INC-1042 --json-out data/demo/report.json
+
+# 2. Serve it. RCA_SEED_DEMO=1 opens the console on that report immediately.
+RCA_SEED_DEMO=1 uvicorn api.server:app --port 8000
+#    console:  http://localhost:8000/chat
+
+# 3. Or call it as an API
+curl -X POST localhost:8000/chat -H "Content-Type: application/json"      -d '{"message": "Why that PR?"}'
+#    pass the returned session_id back to continue the thread
+```
+
+`POST /chat` answers about `RCA_CHAT_REPORT` (default `data/demo/report.json`) so a caller
+needs no job ID. A reply carries three checks, because a chatbot's citations are only
+useful if they can't be faked:
+
+| Field | What it guards against |
+|---|---|
+| `unverified` | The model cited an evidence ID that does not exist (`[I1]`, `[L99]`). It is rewritten to `[unverified]` in the reply rather than left looking real. |
+| `unsupported_times` | A timestamp in the answer that the *cited* evidence does not contain. Added after a live 3B model attributed a pull-request deploy time to an alert. The reply gets a visible `[Check: …]` note. |
+| scope refusal | Anything not about the incident gets one fixed sentence. Verified on `llama3.2:3b` and `llama3.1:8b`. |
+
+**Known limits, stated plainly.** The checks prove a cited ID *exists* and that stated
+times are *present in what was cited*; they cannot prove a sentence is true, and they do
+not see times written as "around 8am". The chat can also only be as good as the report it
+reads — a weak report gives a weak chat.
 
 ---
 
@@ -300,24 +343,28 @@ rca/
     base.py         LogSource / ChangeSource / AlertSource protocols
     file_sources.py offline implementations
     git_source.py   real git repositories
-api/server.py       FastAPI webhook trigger
+api/server.py       FastAPI: webhooks, jobs, follow-up chat
+  api/static/chat.html  the chat console
+rca/chat.py         grounded Q&A over a finished report
 scripts/
   scenarios.py      four incidents + their ground truth
   seed_demo.py      writes scenarios to disk
   evaluate.py       runs the sweep and scores it
-tests/              138 tests, no server needed
+tests/              194 tests, no server needed
 ```
 
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
-| `RCA_MODEL` | `qwen2.5:7b` | Production: `Qwen/Qwen3-32B` or `Llama-3.3-70B-Instruct` |
+| `RCA_MODEL` | `llama3.2:3b` | Production: `Qwen/Qwen3-32B` or `Llama-3.3-70B-Instruct` |
 | `RCA_BASE_URL` | `http://localhost:11434/v1` | Ollama; vLLM is usually `:8000/v1` |
 | `RCA_API_KEY` | `not-needed` | Self-hosted servers ignore it |
 | `RCA_STRATEGY` | `auto` | `agentic` / `guided` / `auto` |
 | `RCA_TIMEOUT` | `600` | Generation timeout, seconds |
 | `RCA_JSON_SCHEMA` | `true` | Guided decoding; set false for older servers |
+| `RCA_CHAT_REPORT` | `data/demo/report.json` | The report `POST /chat` answers about |
+| `RCA_SEED_DEMO` | off | `1` lists that report as a finished job so the console opens on it |
 | `RCA_MAX_TOOL_ITERATIONS` | `20` | Ceiling on the agentic loop |
 | `RCA_MAX_LOG_LINES` | `60` | Hard cap on lines any one search returns |
 | `RCA_DATA_DIR` | `./data` | |

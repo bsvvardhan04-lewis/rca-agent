@@ -21,9 +21,10 @@ except ImportError:  # pragma: no cover
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Sensible defaults for a laptop running Ollama. Production points at vLLM
+# Sensible defaults for a CPU-only laptop running Ollama (llama3.2:3b is the
+# model the whole pipeline has been run against end to end). Production points at vLLM
 # serving something in the 32B-70B class - see README.
-DEFAULT_MODEL = "qwen2.5:7b"
+DEFAULT_MODEL = "llama3.2:3b"
 DEFAULT_BASE_URL = "http://localhost:11434/v1"
 
 VALID_STRATEGIES = {"agentic", "guided", "auto"}
@@ -78,6 +79,16 @@ class Settings:
         default_factory=lambda: Path(_env("RCA_DATA_DIR", str(PROJECT_ROOT / "data"))).resolve()
     )
     reports_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "reports")
+
+    # The finished report that `POST /chat` answers questions about when the
+    # caller has no job ID - which is the case for any generic chatbot
+    # evaluator, since it can't file an incident and wait for a job. Saved with
+    # `rca.cli investigate --json-out`.
+    chat_report: Path = field(
+        default_factory=lambda: Path(
+            _env("RCA_CHAT_REPORT", str(PROJECT_ROOT / "data" / "demo" / "report.json"))
+        ).resolve()
+    )
 
     # Optional real sources. Blank means "use the files in data/".
     # A local clone needs no token - git handles its own auth - so

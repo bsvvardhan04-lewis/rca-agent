@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>RCA Agent - Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  One file, no build step, no CDN. The whole point of this project is that it
+  runs inside a network with no outbound calls; a UI that pulls React off a CDN
+  would quietly break that.
+-->
+<style>
+  :root {
+    --bg: #0f1115; --panel: #161a21; --panel-2: #1c212a; --line: #2a313d;
+    --ink: #e6e9ef; --dim: #8c95a4; --accent: #5aa9ff; --warn: #ffb454;
+    --bad: #ff6b6b; --ok: #5ddba4;
+    --log: #5aa9ff; --change: #c58aff; --alert: #ffb454;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    height: 100vh; display: grid; grid-template-columns: 300px 1fr 320px;
+  }
+  aside, main, section.evidence { height: 100vh; overflow-y: auto; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); }
+  section.evidence { background: var(--panel); border-left: 1px solid var(--line); }
+  h1 { font-size: 15px; margin: 0; letter-spacing: .04em; text-transform: uppercase; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: var(--dim); margin: 0 0 10px; font-weight: 600; }
+  .pad { padding: 16px; }
+  .head { padding: 16px; border-bottom: 1px solid var(--line);
+          display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); flex: none; }
+  .dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+
+  button {
+    font: inherit; color: var(--ink); background: var(--panel-2);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #06121f; border-color: var(--accent);
+                   font-weight: 600; }
+  input, textarea {
+    font: inherit; width: 100%; color: var(--ink); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 11px;
+    resize: none;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  label { display: block; font-size: 12px; color: var(--dim); margin: 10px 0 4px; }
+
+  .job {
+    padding: 11px 16px; border-bottom: 1px solid var(--line); cursor: pointer;
+  }
+  .job:hover { background: var(--panel-2); }
+  .job[aria-current="true"] { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .job .id { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+  .job .sub { color: var(--dim); font-size: 12px; margin-top: 3px;
+              display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+              overflow: hidden; }
+  .badge { font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+           padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line);
+           color: var(--dim); }
+  .badge.done { color: var(--ok); border-color: var(--ok); }
+  .badge.failed { color: var(--bad); border-color: var(--bad); }
+  .badge.running, .badge.queued { color: var(--warn); border-color: var(--warn); }
+
+  main { display: flex; flex-direction: column; }
+  #log { flex: 1; overflow-y: auto; padding: 18px 22px; }
+  .msg { max-width: 760px; margin: 0 0 16px; }
+  .msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+              color: var(--dim); margin-bottom: 5px; }
+  .msg .body { background: var(--panel); border: 1px solid var(--line);
+               border-radius: 10px; padding: 12px 14px; white-space: pre-wrap;
+               word-wrap: break-word; }
+  .msg.user { margin-left: auto; }
+  .msg.user .body { background: var(--panel-2); border-color: #35405060; }
+  .msg.user .who { text-align: right; }
+  .msg.error .body { border-color: var(--bad); color: var(--bad); }
+
+  cite {
+    font-style: normal; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+    padding: 0 5px; border-radius: 4px; cursor: pointer;
+    border: 1px solid currentColor; background: #ffffff10;
+  }
+  cite.L { color: var(--log); } cite.C { color: var(--change); } cite.A { color: var(--alert); }
+  cite.bad { color: var(--bad); cursor: help; }
+
+  form.ask { border-top: 1px solid var(--line); padding: 14px 22px;
+             display: flex; gap: 10px; align-items: flex-end; background: var(--panel); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 22px 0; }
+  .chips button { font-size: 12.5px; padding: 5px 10px; color: var(--dim); text-align: left; }
+
+  .ev { padding: 9px 12px; border: 1px solid var(--line); border-radius: 8px;
+        margin-bottom: 7px; font-size: 12.5px; background: var(--bg); }
+  .ev code { font-family: ui-monospace, Consolas, monospace; font-weight: 600; }
+  .ev.L code { color: var(--log); } .ev.C code { color: var(--change); }
+  .ev.A code { color: var(--alert); }
+  .ev .txt { color: var(--dim); font-family: ui-monospace, Consolas, monospace;
+             font-size: 11.5px; margin-top: 4px; word-break: break-word; }
+  .ev.flash { border-color: var(--accent); background: #5aa9ff18; }
+
+  .empty { color: var(--dim); padding: 40px 22px; max-width: 560px; }
+  .empty code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px;
+                font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .spin { display: inline-block; width: 12px; height: 12px; border-radius: 50%;
+          border: 2px solid var(--line); border-top-color: var(--accent);
+          animation: spin .8s linear infinite; vertical-align: -2px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Narrow screens: stack the three panels rather than hiding two of them.
+     Hiding the sidebar also hid the incident list, leaving no way to open one. */
+  @media (max-width: 1100px) {
+    body { grid-template-columns: 1fr; height: auto; min-height: 100vh; }
+    aside, section.evidence { height: auto; max-height: 38vh; border: 0;
+                              border-bottom: 1px solid var(--line); }
+    main { height: 92vh; }
+    section.evidence { order: 3; border-top: 1px solid var(--line); border-bottom: 0; }
+  }
+</style>
+
+<aside>
+  <div class="head">
+    <h1>Incidents</h1>
+    <button id="refresh" title="Reload">&#8635;</button>
+  </div>
+  <div id="jobs"></div>
+  <div class="pad">
+    <h2>File a new one</h2>
+    <form id="new">
+      <label for="t">Title</label>
+      <input id="t" required placeholder="Checkout returns 500s">
+      <label for="d">What the reporter saw</label>
+      <textarea id="d" rows="4" required
+        placeholder="Customers report payment failures since about 13:40. Retrying sometimes works."></textarea>
+      <label for="s">Service hint (optional)</label>
+      <input id="s" placeholder="payments-api">
+      <p><button class="primary" type="submit" style="width:100%">Investigate</button></p>
+    </form>
+  </div>
+</aside>
+
+<main>
+  <div class="head">
+    <div>
+      <h1 id="title">RCA Console</h1>
+      <div id="sub" class="sub" style="color:var(--dim);font-size:12.5px"></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;white-space:nowrap">
+      <span class="dot" id="hdot"></span>
+      <span id="hmodel" style="color:var(--dim);font-size:12px"></span>
+      <button id="clear" title="Clear this transcript">Clear</button>
+    </div>
+  </div>
+  <div id="log"></div>
+  <div class="chips" id="chips"></div>
+  <form class="ask" id="ask">
+    <textarea id="q" rows="2" placeholder="Ask about this report - why that PR, what was ruled out, how sure&hellip;" disabled></textarea>
+    <button class="primary" type="submit" id="send" disabled>Ask</button>
+  </form>
+</main>
+
+<section class="evidence">
+  <div class="head"><h1>Evidence</h1><span id="evcount" style="color:var(--dim);font-size:12px"></span></div>
+  <div class="pad" id="evidence"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const api = (p, o) => fetch(p, o).then(async (r) => {
+  if (r.status === 204) return null;
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `${r.status} ${r.statusText}`);
+  return body;
+});
+
+let current = null;      // job_id
+let known = new Set();   // evidence IDs that exist for the current report
+let polling = null;
+
+const esc = (s) => s.replace(/[&<>"]/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// Turn [C1] / C1 into a clickable chip, but only when the ID really exists.
+// An unresolvable one arrives from the server already rewritten to
+// "[unverified]"; it is marked here so it cannot be mistaken for a citation.
+function withCitations(text) {
+  return esc(text)
+    .replace(/\[unverified\]/g, '<cite class="bad" title="The model cited an evidence ID that does not exist. This claim is unsupported.">unverified</cite>')
+    .replace(/\[?\b([LCA]\d{1,3})\b\]?/g, (m, id) =>
+      known.has(id) ? `<cite class="${id[0]}" data-ev="${id}">${id}</cite>` : m);
+}
+
+function bubble(role, text, cls = "") {
+  $("log").querySelector(".empty")?.remove();   // the "ready to question" hint, once a thread starts
+  const div = document.createElement("div");
+  div.className = `msg ${role} ${cls}`;
+  div.innerHTML =
+    `<div class="who">${role === "user" ? "You" : role === "error" ? "Error" : "RCA agent"}</div>` +
+    `<div class="body">${role === "user" || role === "error" ? esc(text) : withCitations(text)}</div>`;
+  $("log").append(div);
+  $("log").scrollTop = $("log").scrollHeight;
+  return div;
+}
+
+$("log").addEventListener("click", (e) => {
+  const id = e.target.dataset?.ev;
+  if (!id) return;
+  const row = document.querySelector(`.ev[data-id="${id}"]`);
+  if (!row) return;
+  row.scrollIntoView({ block: "center", behavior: "smooth" });
+  row.classList.add("flash");
+  setTimeout(() => row.classList.remove("flash"), 1400);
+});
+
+async function loadJobs() {
+  const jobs = await api("/jobs");
+  $("jobs").innerHTML = jobs.length ? "" : '<div class="pad" style="color:var(--dim)">No incidents yet.</div>';
+  for (const j of jobs) {
+    const el = document.createElement("div");
+    el.className = "job";
+    el.setAttribute("aria-current", String(j.job_id === current));
+    el.innerHTML =
+      `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">
+         <span class="id">${esc(j.incident_id)}</span>
+         <span class="badge ${j.status}">${j.status}</span>
+       </div>
+       <div class="sub">${esc(j.headline || "investigating&hellip;")}</div>`;
+    el.onclick = () => open(j.job_id);
+    $("jobs").append(el);
+  }
+  // Keep refreshing while anything is still running.
+  clearTimeout(polling);
+  if (jobs.some((j) => j.status === "queued" || j.status === "running")) {
+    polling = setTimeout(loadJobs, 2500);
+  }
+}
+
+async function open(jobId) {
+  current = jobId;
+  $("log").innerHTML = '<div class="empty">Loading&hellip;</div>';
+  await loadJobs();
+
+  let state;
+  try {
+    state = await api(`/jobs/${jobId}/chat`);
+  } catch (err) {
+    $("log").innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    $("q").disabled = $("send").disabled = true;
+    return;
+  }
+
+  known = new Set(state.evidence.map((e) => e.id));
+  $("title").textContent = state.incident_id;
+  $("sub").textContent = state.headline;
+  $("evcount").textContent = `${state.evidence.length} item${state.evidence.length === 1 ? "" : "s"}`;
+  $("evidence").innerHTML = state.evidence.length
+    ? state.evidence.map((e) =>
+        `<div class="ev ${e.id[0]}" data-id="${e.id}">
+           <code>${e.id}</code> <span style="color:var(--dim)">${e.kind}</span>
+           <div class="txt">${esc(e.summary)}</div>
+         </div>`).join("")
+    : '<div style="color:var(--dim)">No evidence was retrieved.</div>';
+
+  $("log").innerHTML = "";
+  if (state.turns.length) {
+    for (const t of state.turns) bubble(t.role, t.content);
+  } else {
+    $("log").innerHTML =
+      `<div class="empty">This report is ready to question. Answers come only from the
+       ${state.evidence.length} evidence item${state.evidence.length === 1 ? "" : "s"} on the
+       right - if something was not checked during the investigation, the agent will say so
+       rather than guess.</div>`;
+  }
+
+  $("chips").innerHTML = "";
+  for (const s of state.suggestions) {
+    const b = document.createElement("button");
+    b.textContent = s;
+    b.onclick = () => { $("q").value = s; $("ask").requestSubmit(); };
+    $("chips").append(b);
+  }
+  $("q").disabled = $("send").disabled = false;
+  $("q").focus();
+}
+
+$("ask").onsubmit = async (e) => {
+  e.preventDefault();
+  const question = $("q").value.trim();
+  if (!question || !current) return;
+
+  bubble("user", question);
+  $("q").value = "";
+  $("q").disabled = $("send").disabled = true;
+  const pending = bubble("assistant", "");
+  pending.querySelector(".body").innerHTML = '<span class="spin"></span> reading the evidence&hellip;';
+
+  try {
+    const reply = await api(`/jobs/${current}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question }),
+    });
+    pending.querySelector(".body").innerHTML = withCitations(reply.answer);
+  } catch (err) {
+    pending.remove();
+    bubble("error", err.message);
+  } finally {
+    $("q").disabled = $("send").disabled = false;
+    $("q").focus();
+    $("log").scrollTop = $("log").scrollHeight;
+  }
+};
+
+$("q").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("ask").requestSubmit(); }
+});
+
+$("clear").onclick = async () => {
+  if (!current) return;
+  await api(`/jobs/${current}/chat`, { method: "DELETE" });
+  open(current);
+};
+
+$("new").onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $("new").querySelector("button");
+  btn.disabled = true;
+  btn.textContent = "Investigating…";
+  try {
+    const job = await api("/incidents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: $("t").value.trim(),
+        description: $("d").value.trim(),
+        service_hint: $("s").value.trim() || null,
+        reporter: "console",
+      }),
+    });
+    $("new").reset();
+    current = job.job_id;
+    await loadJobs();
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Investigate";
+  }
+};
+
+$("refresh").onclick = loadJobs;
+
+api("/health").then((h) => {
+  $("hdot").className = "dot " + (h.model_server_reachable ? "ok" : "bad");
+  $("hmodel").textContent = h.model;
+  $("hdot").title = $("hmodel").title = h.model_server_detail;
+}).catch(() => { $("hdot").className = "dot bad"; });
+
+loadJobs();
+</script>
