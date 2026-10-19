@@ -101,6 +101,12 @@ class Settings:
     # until this is set.
     chat_token: str = field(default_factory=lambda: _env("RCA_CHAT_TOKEN"))
 
+    # Hand the report writer a computed table of candidate changes and the
+    # dominant error messages. OFF by default: on llama3.2:3b it made the model
+    # blame the decoy PR in 4 of 4 scenarios (see rca/prompts.py). Worth trying
+    # on a larger model; do not enable it without measuring.
+    computed_facts: bool = field(default_factory=lambda: _bool_env("RCA_COMPUTED_FACTS", False))
+
     # -- guard rails ----------------------------------------------------
     max_tool_iterations: int = field(
         default_factory=lambda: _int_env("RCA_MAX_TOOL_ITERATIONS", 20)

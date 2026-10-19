@@ -189,3 +189,25 @@ Rules:
 - Questions about what was *ruled out* are common and important. The report's
   contradicting evidence and evidence gaps are where those answers live.
 """
+
+
+# Used only when RCA_COMPUTED_FACTS=1. Measured on llama3.2:3b over the four gold
+# scenarios, giving the writer a computed "Candidate changes" table plus this
+# instruction made it blame the look-alike PR in 4 of 4 (0 of 4 passed, mean 27%
+# against 46% without it). A small model reads "address every candidate" as
+# "pick one". It stays available, off by default, for testing on larger models.
+SYNTHESIS_FACTS_ADDENDUM = """
+Extra rules for this run, because the evidence below includes computed sections:
+
+- **Address every change under "Candidate changes".** Each must appear in your
+  answer - as the cause, or as a rejected alternative with the reason: when it
+  deployed relative to the first errors, whether its services are the ones
+  logging errors, and whether its description could produce those errors. A
+  change you silently skip is a change the engineer has to re-investigate. A
+  change that deployed AFTER the first errors cannot be their cause.
+- **Name the mechanism in the words of the evidence**: the exact resource,
+  limit or message from "Dominant warning/error messages" and the change
+  description - not a category. "Holds a pooled DB connection across a network
+  call, so concurrent requests exhaust a pool of 10" is a mechanism;
+  "resource exhaustion" is a label.
+"""

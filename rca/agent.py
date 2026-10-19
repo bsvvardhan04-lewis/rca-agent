@@ -35,6 +35,7 @@ from collections.abc import Callable
 from datetime import timedelta
 from typing import Any
 
+from rca.analysis import change_table, dominant_errors, error_services
 from rca.calibration import cap_overconfidence
 from rca.config import Settings, settings as default_settings
 from rca.evidence import EvidenceLedger
@@ -50,7 +51,7 @@ from rca.models import (
     parse_ts,
 )
 from rca.timeline import build_timeline
-from rca.prompts import INVESTIGATOR_SYSTEM, SYNTHESIS_SYSTEM, TRIAGE_SYSTEM
+from rca.prompts import INVESTIGATOR_SYSTEM, SYNTHESIS_FACTS_ADDENDUM, SYNTHESIS_SYSTEM, TRIAGE_SYSTEM
 from rca.sources.base import SourceBundle
 from rca.tools import ToolContext, build_tools
 
@@ -490,6 +491,9 @@ class RCAAgent:
     ) -> RCAAnalysis:
         self.on_event("phase", "Synthesis - ranking hypotheses and writing the report")
 
+        # Computed first: it adds the candidate changes to the ledger, so they are
+        # citable and appear in the ledger lines below.
+        computed = self._computed_facts(ctx) if self.settings.computed_facts else []
         ledger_lines = [item.one_line() for item in ctx.ledger.items()] or [
             "(no evidence was retrieved)"
         ]
@@ -505,6 +509,7 @@ class RCAAgent:
                 "## Evidence ledger - these are the ONLY citable IDs",
                 *ledger_lines,
                 "",
+                *computed,
                 "## Investigator findings",
                 findings,
             ]
@@ -512,7 +517,7 @@ class RCAAgent:
 
         analysis = complete_structured(
             self.client,
-            system=SYNTHESIS_SYSTEM,
+            system=SYNTHESIS_SYSTEM + (SYNTHESIS_FACTS_ADDENDUM if self.settings.computed_facts else ""),
             user=payload,
             model_cls=RCAAnalysis,
             usage=usage,
@@ -545,6 +550,45 @@ class RCAAgent:
             analysis.timeline = derived
 
         return analysis
+
+    def _computed_facts(self, ctx: ToolContext) -> list[str]:
+        """Timing and wording the writer should be handed, not left to infer.
+
+        Found on a 3B model: it never discussed a candidate PR it had not been
+        told to look at, and it described the cause as a category ("resource
+        exhaustion") because the error text and the PR description were buried
+        in tool output it did not read back. Both are plain computation over
+        evidence already retrieved. Any failure here must not stop the report,
+        so it degrades to "no extra facts".
+        """
+        try:
+            log_summaries = [item.summary for item in ctx.ledger.by_kind("log")]
+            err_services = error_services(log_summaries)
+            onset = self._find_onset(ctx)
+            changes = ctx.sources.changes.list_changes(start=ctx.window.start, end=ctx.window.end)
+            if not changes:
+                changes = ctx.sources.changes.list_changes(
+                    start=ctx.window.end - timedelta(hours=48), end=ctx.window.end
+                )
+            changes = changes[:5]
+            ids = {c.id: ctx.ledger.add_change(c) for c in changes}  # now citable
+        except Exception as exc:  # noqa: BLE001 - extra facts are a help, never a dependency
+            self.on_event("warn", f"Could not compute candidate-change facts: {exc}")
+            return []
+
+        lines: list[str] = []
+        if onset is not None:
+            lines += [f"## First errors (computed from error volume): {iso(onset)}", ""]
+        if changes:
+            lines += [
+                "## Candidate changes (computed from the change source - address EVERY one)",
+                *change_table(changes, onset, err_services, ids),
+                "",
+            ]
+        errors = dominant_errors(log_summaries)
+        if errors:
+            lines += ["## Dominant warning/error messages in the retrieved logs (computed)", *errors, ""]
+        return lines
 
     # -- orchestration -----------------------------------------------------
 

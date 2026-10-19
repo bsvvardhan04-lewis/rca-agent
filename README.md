@@ -360,11 +360,20 @@ each run is written to `reports/` (generated output, so not committed). Four sce
 |---|---|---|---|---|
 | Single model call, no tools (baseline) | 0 / 4 | 48% | 0 / 4 | 107 s |
 | Pipeline, before the coverage guard | 0 / 4 | 42% | 1 / 4 | 268 s |
-| Pipeline, with the coverage guard | 1 / 4 | 46% | 4 / 4 | 198 s |
+| Pipeline, with the coverage guard (**shipped**) | 1 / 4 | 46% | 4 / 4 | 198 s |
+| Pipeline, guard + computed candidate-change table (tried, reverted) | 0 / 4 | 27% | 4 / 4 | 457 s |
 
 A repeat run with the guard gave identical results. A first run of that sweep was discarded
 for timing (the laptop slept mid-run and recorded durations of 1,538 s and 8,144 s); its
 quality results matched the clean run exactly.
+
+**A change that made it worse, and was reverted.** After the guard, I tried giving the writing
+step a computed table of candidate changes (deploy time relative to the first errors, whether the
+services match, the PR description) plus the dominant error messages, and told it to address every
+one. On the 3B model it blamed the look-alike PR in **4 of 4** scenarios and scored 27% (0 of 4
+passed), and it was 2.3x slower: a small model reads "address every candidate" as "pick one". It
+is kept, off by default, behind `RCA_COMPUTED_FACTS=1` (`rca/analysis.py`) for trying on a larger
+model. Prompt tuning on the same four scenarios would only overfit them, so I stopped there.
 
 What this does and does not show. The first full sweep found that three of four runs made a
 single tool call, because the loop ends when the model stops asking, so no change list was ever
@@ -443,7 +452,7 @@ scripts/
   scenarios.py      four incidents + their ground truth
   seed_demo.py      writes scenarios to disk
   evaluate.py       runs the sweep and scores it
-tests/              264 tests, no server needed
+tests/              289 tests, no server needed
 ```
 
 ## Configuration
@@ -459,6 +468,7 @@ tests/              264 tests, no server needed
 | `RCA_CHAT_REPORT` | `data/demo/report.json` | The report `POST /chat` answers about |
 | `RCA_SEED_DEMO` | off | `1` lists that report as a finished job so the console opens on it |
 | `RCA_CHAT_TOKEN` | unset | Bearer token for `POST /chat` and `/v1/*`. Required by `public_app` |
+| `RCA_COMPUTED_FACTS` | off | `1` hands the writer a computed candidate-change table. Made a 3B model worse; see the results above |
 | `RCA_WARMUP` | off | `1` answers one real question at startup so the first caller is not the one who waits |
 | `RCA_WARMUP_INTERVAL` | `240` | Seconds between keep-warm questions; `0` warms once |
 | `RCA_PUBLIC_OPEN` | off | `1` lets `public_app` serve with no token (not recommended) |
