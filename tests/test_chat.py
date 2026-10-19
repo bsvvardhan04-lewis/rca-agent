@@ -393,3 +393,103 @@ def test_context_states_the_totals_so_only_one_change_can_be_counted(chat: Repor
     context = chat.context()
     assert "Totals: 1 log line(s), 1 code change(s), 1 alert(s)" in context
     assert "no evidence of any other change" in context
+
+
+# -- counts the ledger cannot support -----------------------------------------
+#
+# `build_report()` holds exactly one log, one change and one alert.
+
+
+def test_overcounting_alerts_is_flagged():
+    """Live: 'how many alerts fired?' -> 'two', against a ledger with one - the
+    second invented from a pull request's deploy time."""
+    chat = ReportChat(build_report(), client=EchoLLM("Two alerts fired.\nSources: [A1]"))
+    result = chat.answer("how many alerts fired?")
+    assert result.unsupported_counts == ["the report retrieved 1 alert(s), but the answer says two alerts"]
+    assert "[Check:" in result.text and "retrieved 1 alert(s)" in result.text
+
+
+def test_a_count_within_the_ledger_is_fine(chat: ReportChat):
+    assert chat.unsupported_counts("One alert fired, and one change was deployed.") == []
+
+
+def test_digits_and_adjectives_between_number_and_noun_are_caught(chat: ReportChat):
+    assert chat.unsupported_counts("There were 3 pull requests.")
+    assert chat.unsupported_counts("It saw two critical production alerts.")
+    assert chat.unsupported_counts("Only 2 log entries matched.")
+
+
+def test_a_duration_before_the_noun_is_not_a_count(chat: ReportChat):
+    """'3 minutes before the alerts fired' is about time, not three alerts."""
+    for text in (
+        "The errors began 3 minutes before the alerts fired.",
+        "It happened 2 hours after the change was deployed.",
+        "Five minutes since the deploy, the alert fired.",
+        "Two of the alerts were warnings.",
+    ):
+        assert chat.unsupported_counts(text) == [], text
+
+
+def test_undercounting_is_never_flagged():
+    """Saying fewer than the ledger holds may just be talking about a subset."""
+    alerts = [
+        EvidenceItem(id=f"A{i}", kind="alert", summary=f"alert {i}", source="mon") for i in (1, 2, 3)
+    ]
+    chat = ReportChat(build_report(evidence=alerts), client=EchoLLM())
+    assert chat.unsupported_counts("One alert is relevant.") == []
+    assert chat.unsupported_counts("Three alerts fired.") == []
+    assert chat.unsupported_counts("Four alerts fired.") != []
+
+
+def test_a_repeated_overcount_is_reported_once(chat: ReportChat):
+    assert len(chat.unsupported_counts("Two alerts fired. Again: two alerts fired.")) == 1
+
+
+def test_an_answer_with_no_counts_is_untouched():
+    result = ReportChat(build_report(), client=EchoLLM("Roll it back.\nSources: [C1]")).answer("now?")
+    assert result.unsupported_counts == []
+    assert result.text == "Roll it back.\nSources: [C1]"
+
+
+# -- counts implied without a number ------------------------------------------
+
+
+def test_another_change_against_a_ledger_with_one_is_flagged(chat: ReportChat):
+    """Live: 'was PR-4821 the only change?' -> 'No ... there was another change
+    that occurred around the same time'. No number, but it asserts two."""
+    problems = chat.unsupported_counts(
+        "No, according to the report, there was another change that occurred around the same time."
+    )
+    assert problems == ["the report retrieved 1 change(s), but the answer refers to another change"]
+
+
+def test_other_ways_of_saying_there_is_more_are_caught(chat: ReportChat):
+    assert chat.unsupported_counts("A second pull request was merged.")
+    assert chat.unsupported_counts("There was an additional alert on the same service.")
+    assert chat.unsupported_counts("A third deployment followed.")
+    assert chat.unsupported_counts("Another critical alert fired.")
+
+
+def test_a_negated_mention_is_a_correct_answer_not_a_claim(chat: ReportChat):
+    for text in (
+        "There was no additional change in the report.",
+        "The report does not show another alert.",
+        "I can't see a second pull request.",
+        "Never another deployment that day.",
+    ):
+        assert chat.unsupported_counts(text) == [], text
+
+
+def test_another_is_fine_when_the_ledger_really_has_more():
+    two = [
+        EvidenceItem(id="C1", kind="change", summary="PR-1", source="g"),
+        EvidenceItem(id="C2", kind="change", summary="PR-2", source="g"),
+    ]
+    chat = ReportChat(build_report(evidence=two), client=EchoLLM())
+    assert chat.unsupported_counts("There was another change, PR-2.") == []
+    assert chat.unsupported_counts("A third change also landed.") != [], "only two exist"
+
+
+def test_another_without_a_countable_noun_is_not_flagged(chat: ReportChat):
+    assert chat.unsupported_counts("Another possibility is a configuration problem.") == []
+    assert chat.unsupported_counts("It is another example of pool exhaustion.") == []

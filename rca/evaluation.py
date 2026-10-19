@@ -79,7 +79,11 @@ class ScoreCard:
 def _haystack(report: RCAReport) -> str:
     """Everything the report says, lowercased, for substring checks."""
     a = report.analysis
-    parts = [a.headline, a.blast_radius, *a.timeline, *a.immediate_actions, *a.evidence_gaps]
+    # The timeline is deliberately left out. It is built mechanically from the
+    # ledger and so lists every change the agent retrieved, decoys included;
+    # counting it would mark any retrieved decoy as "considered" and inflate the
+    # score for an agent that never reasoned about it.
+    parts = [a.headline, a.blast_radius, *a.immediate_actions, *a.evidence_gaps]
     for h in a.hypotheses:
         parts += [h.statement, h.reasoning, h.suspect_change, *h.verification_steps]
     return " ".join(parts).lower()

@@ -138,6 +138,14 @@ looks like: most of the time is the final report-writing generation, not the too
 A follow-up chat answer takes roughly 10–20 s once the model is loaded; the first one after
 loading can take a minute or more. One incident, one run each - not a benchmark.
 
+**The timeline is built from the evidence, not written by the model.** The 3B model's own
+timeline put a log line's time on an alert, listed a successful `200` as an incident event
+and repeated an entry. `rca/timeline.py` builds it from the ledger instead - every change and
+alert, repeated log lines collapsed with a count, routine INFO traffic dropped once real
+errors exist - and each line ends with the ID of the evidence behind it. It says what
+happened when; it does not explain why. (The evaluator ignores the timeline when checking
+whether a decoy was "considered", since a mechanical timeline lists every change retrieved.)
+
 **Stated confidence is guarded in code.** Both runs came back at 90%, one of them wrong. A
 hypothesis rated above 0.85 is lowered to 0.70 - and the reason written into its reasoning -
 when it is the only hypothesis considered, cites no support, or has evidence cited against
@@ -243,6 +251,7 @@ useful if they can't be faked:
 |---|---|
 | `unverified` | The model cited an evidence ID that does not exist (`[I1]`, `[L99]`). It is rewritten to `[unverified]` in the reply rather than left looking real. |
 | `unsupported_times` | A timestamp in the answer that the *cited* evidence does not contain. Added after a live 3B model attributed a pull-request deploy time to an alert. The reply gets a visible `[Check: …]` note. |
+| `unsupported_counts` | A count the ledger cannot support: "two alerts" when one was retrieved, or "another change" when only one was. Only over-counting is flagged, and negated phrasing ("no other change") is not. Added after a live 3B model answered "two" and invented the second from a PR's deploy time. |
 | scope refusal | Anything not about the incident gets one fixed sentence. Verified on `llama3.2:3b` and `llama3.1:8b`. |
 
 ### For an evaluation harness
@@ -277,6 +286,12 @@ RCA_CHAT_TOKEN=<long random string> uvicorn api.server:public_app --port 8001
 `public_app` fails closed: with no `RCA_CHAT_TOKEN` it answers 503 to everything
 (`RCA_PUBLIC_OPEN=1` opts out explicitly). The same token also guards these routes on the
 main app when set; unset, the main app stays open for localhost use.
+
+**Cold start.** On a CPU the first answer after the model loads took 87-106 s in testing and
+later ones 10-20 s; a harness with a request timeout would see the first call fail. Start the
+server with `RCA_WARMUP=1` and it answers one real question about the report at startup, then
+repeats every `RCA_WARMUP_INTERVAL` seconds (default 240, `0` = once) so the model is not
+unloaded for idleness. Off by default - it spends CPU.
 
 **Known limits, stated plainly.** The checks prove a cited ID *exists* and that stated
 times are *present in what was cited*; they cannot prove a sentence is true, and they do
@@ -392,14 +407,16 @@ rca/
     base.py         LogSource / ChangeSource / AlertSource protocols
     file_sources.py offline implementations
     git_source.py   real git repositories
-api/server.py       FastAPI: webhooks, jobs, follow-up chat
+api/server.py       FastAPI: webhooks, jobs, follow-up chat, evaluator routes
   api/static/chat.html  the chat console
 rca/chat.py         grounded Q&A over a finished report
+rca/timeline.py     timeline built from the evidence ledger
+rca/calibration.py  caps unearned high confidence
 scripts/
   scenarios.py      four incidents + their ground truth
   seed_demo.py      writes scenarios to disk
   evaluate.py       runs the sweep and scores it
-tests/              228 tests, no server needed
+tests/              264 tests, no server needed
 ```
 
 ## Configuration
@@ -415,6 +432,8 @@ tests/              228 tests, no server needed
 | `RCA_CHAT_REPORT` | `data/demo/report.json` | The report `POST /chat` answers about |
 | `RCA_SEED_DEMO` | off | `1` lists that report as a finished job so the console opens on it |
 | `RCA_CHAT_TOKEN` | unset | Bearer token for `POST /chat` and `/v1/*`. Required by `public_app` |
+| `RCA_WARMUP` | off | `1` answers one real question at startup so the first caller is not the one who waits |
+| `RCA_WARMUP_INTERVAL` | `240` | Seconds between keep-warm questions; `0` warms once |
 | `RCA_PUBLIC_OPEN` | off | `1` lets `public_app` serve with no token (not recommended) |
 | `RCA_MAX_TOOL_ITERATIONS` | `20` | Ceiling on the agentic loop |
 | `RCA_MAX_LOG_LINES` | `60` | Hard cap on lines any one search returns |

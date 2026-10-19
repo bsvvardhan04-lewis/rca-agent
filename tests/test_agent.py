@@ -329,3 +329,15 @@ def test_synthesis_lowers_an_unearned_very_likely(sources, settings, incident, t
     assert top.confidence == 0.7
     assert "lowered" in top.reasoning
     assert any(kind == "warn" and "Confidence lowered" in msg for kind, msg in events)
+
+
+def test_synthesis_replaces_the_models_timeline_with_the_evidences(sources, settings, incident, triage):
+    """`analysis()` carries a hand-written timeline. Synthesis must not trust a
+    model's timeline - it is rebuilt from the ledger, every line tied to an ID."""
+    agent, _ = make_agent(sources, settings, triage, analysis(["L1"]))
+    report = agent.investigate(incident)
+
+    assert "13:38 - PR-4821 deployed" not in report.analysis.timeline
+    assert report.analysis.timeline, "the retrieved evidence has timestamps"
+    assert all(line.rstrip().endswith("]") for line in report.analysis.timeline)
+    assert any("PR-4821 deployed" in line for line in report.analysis.timeline)

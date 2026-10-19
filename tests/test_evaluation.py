@@ -280,3 +280,14 @@ def test_a_crashed_run_scores_zero_and_does_not_pass():
     assert card.score == 0.0
     assert not card.passed
     assert summarise([card])["passed"] == 0
+
+
+def test_a_decoy_that_only_appears_in_the_mechanical_timeline_was_not_considered():
+    """The timeline lists every change retrieved, so counting it would let an
+    agent that never reasoned about a decoy score as if it had ruled it out."""
+    report = make_report(suspect="PR-4821")
+    report.analysis.timeline = ["2026-09-25T07:40:00Z - PR-4817 deployed: unrelated [C2]"]
+    truth = {**CODE_TRUTH, "must_rule_out": ["PR-4817"]}
+    card = score_report(report, truth)
+    assert not check(card, "decoys").passed
+    assert "never considered" in check(card, "decoys").detail

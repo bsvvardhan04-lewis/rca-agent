@@ -729,7 +729,7 @@ def test_the_public_app_exposes_nothing_but_chat(public, token):
 
 def test_the_public_health_reveals_nothing_internal(public, monkeypatch):
     monkeypatch.setattr(server, "build_client", lambda *_a, **_k: UpClient())
-    assert public.get("/health").json() == {"status": "ok"}
+    assert public.get("/health").json() == {"status": "ok", "warm": None}
 
 
 # -- deep health --------------------------------------------------------------
@@ -781,3 +781,111 @@ def test_deep_health_is_ok_when_generation_works(client, monkeypatch):
     body = client.get("/health?deep=true").json()
     assert body["status"] == "ok" and body["generation_ok"] is True
     assert stub.generated == 1
+
+
+# -- counts, over the API -----------------------------------------------------
+
+
+def test_an_overcount_reaches_every_evaluator_shape(client, standing, monkeypatch):
+    """The `standing` report has one alert. 'Two alerts' must be flagged in the
+    structured field, in the text a reply-only caller reads, and in the OpenAI
+    `rca` block."""
+    monkeypatch.setattr(
+        server, "build_client", lambda *_a, **_k: ChatLLM("Two alerts fired.\nSources: [A1]")
+    )
+    plain = client.post("/chat", json={"message": "how many alerts?"}).json()
+    assert plain["unsupported_counts"] and "[Check:" in plain["reply"]
+
+    openai = oai(client, [{"role": "user", "content": "how many alerts?"}]).json()
+    assert openai["rca"]["unsupported_counts"]
+    assert "[Check:" in openai["choices"][0]["message"]["content"]
+
+
+# -- warm-up ------------------------------------------------------------------
+
+
+def test_warm_up_asks_one_real_question_about_the_standing_report(client, standing, llm):
+    assert server.warm_up() is True
+    assert llm.calls == 1
+    assert "Evidence ledger" in llm.seen["messages"][0]["content"], "it must prime the real prompt"
+
+
+def test_warm_up_never_raises_when_there_is_nothing_to_warm(client, tmp_path, monkeypatch, llm):
+    monkeypatch.setattr(server.settings, "chat_report", tmp_path / "missing.json")
+    server._STANDING.clear()
+    assert server.warm_up() is False
+    assert llm.calls == 0
+
+
+def test_warm_up_swallows_a_dead_model_server(client, standing, monkeypatch):
+    from rca.llm.base import LLMError
+
+    class Dead(ChatLLM):
+        def chat(self, **_kwargs):
+            raise LLMError("refused")
+
+    monkeypatch.setattr(server, "build_client", lambda *_a, **_k: Dead())
+    assert server.warm_up() is False
+
+
+def test_warm_up_is_off_unless_asked_for(monkeypatch):
+    """Tests and real deployments must not fire a model call at startup."""
+    started: list = []
+    monkeypatch.delenv("RCA_WARMUP", raising=False)
+    monkeypatch.setattr(server.threading, "Thread", lambda *a, **k: started.append(k) or None)
+    server._maybe_warm()
+    assert started == []
+
+
+def test_warm_up_starts_one_background_thread_when_enabled(monkeypatch):
+    seen: list = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            seen.append((target, args, name, daemon))
+
+        def start(self):
+            seen.append("started")
+
+    monkeypatch.setenv("RCA_WARMUP", "1")
+    monkeypatch.setenv("RCA_WARMUP_INTERVAL", "0")
+    monkeypatch.setattr(server.threading, "Thread", FakeThread)
+    server._maybe_warm()
+
+    target, args, name, daemon = seen[0]
+    assert target is server._keep_warm and args == (0.0,)
+    assert daemon is True, "a warm-up thread must never keep the process alive"
+    assert seen[1] == "started"
+
+
+def test_a_bad_warm_up_interval_falls_back_instead_of_crashing(monkeypatch):
+    seen: list = []
+
+    class FakeThread:
+        def __init__(self, *, target, args, name, daemon):
+            seen.append(args)
+
+        def start(self):
+            pass
+
+    monkeypatch.setenv("RCA_WARMUP", "1")
+    monkeypatch.setenv("RCA_WARMUP_INTERVAL", "soon")
+    monkeypatch.setattr(server.threading, "Thread", FakeThread)
+    server._maybe_warm()
+    assert seen == [(240.0,)]
+
+
+def test_warm_up_records_how_it_went(client, standing, llm):
+    """`warm` is how an operator knows the first caller will not be the one who waits."""
+    server.WARM_STATE.update(ok=None, seconds=None, at=None)
+    assert server.warm_up() is True
+    assert server.WARM_STATE["ok"] is True
+    assert server.WARM_STATE["seconds"] >= 0
+    assert client.get("/health").json()["warm_up"]["ok"] is True
+
+
+def test_a_failed_warm_up_is_recorded_as_failed(client, tmp_path, monkeypatch, llm):
+    monkeypatch.setattr(server.settings, "chat_report", tmp_path / "missing.json")
+    server._STANDING.clear()
+    server.warm_up()
+    assert server.WARM_STATE["ok"] is False

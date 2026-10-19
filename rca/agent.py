@@ -49,6 +49,7 @@ from rca.models import (
     iso,
     parse_ts,
 )
+from rca.timeline import build_timeline
 from rca.prompts import INVESTIGATOR_SYSTEM, SYNTHESIS_SYSTEM, TRIAGE_SYSTEM
 from rca.sources.base import SourceBundle
 from rca.tools import ToolContext, build_tools
@@ -479,6 +480,14 @@ class RCAAgent:
         # was just dropped has no support left, and should not stay "very likely".
         for note in cap_overconfidence(analysis):
             self.on_event("warn", note)
+
+        # The model's own timeline is replaced, not checked: a timestamp that
+        # exists in the ledger can still be attached to the wrong event (a live
+        # 3B run put a log line's time on an alert). Built from the evidence it
+        # is correct by construction, and each line carries its evidence ID.
+        derived = build_timeline(ctx.ledger.items())
+        if derived:
+            analysis.timeline = derived
 
         return analysis
 

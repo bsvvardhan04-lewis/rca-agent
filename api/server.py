@@ -40,7 +40,7 @@ from rca.agent import RCAAgent
 from rca.chat import ChatAnswer, ReportChat, suggested_questions
 from rca.config import settings
 from rca.llm import LLMError, build_client
-from rca.models import ChatTurn, IncidentReport, RCAReport, utcnow
+from rca.models import ChatTurn, IncidentReport, RCAReport, iso, utcnow
 from rca.report import to_markdown
 from rca.sources import SourceBundle, build_sources
 
@@ -210,6 +210,7 @@ def health(deep: bool = False) -> dict[str, Any]:
         "status": "ok" if healthy else "degraded",
         "generation_ok": generation_ok,
         "generation_detail": generation_detail,
+        "warm_up": dict(WARM_STATE),
         "model": settings.model,
         "model_server": settings.llm_base_url,
         "model_server_reachable": reachable,
@@ -287,6 +288,7 @@ class ChatReply(BaseModel):
     evidence: list[dict[str, str]]
     unverified: list[str]
     unsupported_times: list[str] = Field(default_factory=list)
+    unsupported_counts: list[str] = Field(default_factory=list)
     turns: int
 
 
@@ -382,6 +384,7 @@ def ask(job_id: str, payload: Question) -> ChatReply:
         evidence=chat.resolve(result.citations),
         unverified=result.unresolved,
         unsupported_times=result.unsupported_times,
+        unsupported_counts=result.unsupported_counts,
         turns=len(job.chat),
     )
 
@@ -487,6 +490,7 @@ class SimpleReply(BaseModel):
     citations: list[str]
     unverified: list[str]
     unsupported_times: list[str] = Field(default_factory=list)
+    unsupported_counts: list[str] = Field(default_factory=list)
     session_id: str | None = None
     incident_id: str
 
@@ -562,6 +566,7 @@ def chat_simple(payload: SimpleMessage) -> SimpleReply:
         citations=result.citations,
         unverified=result.unresolved,
         unsupported_times=result.unsupported_times,
+        unsupported_counts=result.unsupported_counts,
         session_id=session_id,
         incident_id=report.incident.id,
     )
@@ -649,6 +654,7 @@ def chat_completions(payload: OAIRequest) -> dict[str, Any]:
             "citations": result.citations,
             "unverified": result.unresolved,
             "unsupported_times": result.unsupported_times,
+            "unsupported_counts": result.unsupported_counts,
         },
     }
 
@@ -702,7 +708,62 @@ public_app.add_exception_handler(StarletteHTTPException, _openai_style_errors)
 def public_health() -> dict[str, Any]:
     """Liveness for whoever is checking the tunnel. Reveals nothing internal."""
     reachable, _detail = build_client(settings).health()
-    return {"status": "ok" if reachable else "degraded"}
+    return {"status": "ok" if reachable else "degraded", "warm": WARM_STATE["ok"]}
+
+
+# --------------------------------------------------------------------------
+# Warm-up
+#
+# On a CPU the first answer after the model loads took 87-106 s in testing and
+# every later one 10-20 s: load time plus reading the whole report prompt for the
+# first time. An evaluator with a request timeout would see the first call fail.
+# Answering one real question at startup pays that cost before anyone is waiting,
+# and repeating it keeps the model from being unloaded for idleness (Ollama drops
+# a model after five minutes by default). Off unless RCA_WARMUP=1.
+# --------------------------------------------------------------------------
+
+_WARM_STOP = threading.Event()
+# ok is None until a warm-up has finished, then whether it answered.
+WARM_STATE: dict[str, Any] = {"ok": None, "seconds": None, "at": None}
+
+
+def warm_up() -> bool:
+    """One real, small answer about the standing report. Never raises."""
+    started = time.monotonic()
+    ok = False
+    try:
+        _ask(_standing_report(), "What is the headline of this report?", [], who="warm-up")
+        ok = True
+    except HTTPException as exc:
+        logger.warning("Warm-up skipped: %s", exc.detail)
+    except Exception:  # noqa: BLE001 - a failed warm-up must not take the server down
+        logger.exception("Warm-up failed")
+    finally:
+        WARM_STATE.update(ok=ok, seconds=round(time.monotonic() - started, 1), at=iso(utcnow()))
+    return ok
+
+
+def _keep_warm(interval: float) -> None:
+    warm_up()
+    while interval > 0 and not _WARM_STOP.wait(interval):
+        warm_up()
+
+
+def _maybe_warm() -> None:
+    if not _flag("RCA_WARMUP"):
+        return
+    try:
+        interval = float(os.environ.get("RCA_WARMUP_INTERVAL", "240") or 0)
+    except ValueError:
+        interval = 240.0
+    _WARM_STOP.clear()
+    threading.Thread(target=_keep_warm, args=(interval,), name="rca-warmup", daemon=True).start()
+
+
+# The same decorator the demo seed uses; this FastAPI has no add_event_handler.
+for _app in (app, public_app):
+    _app.on_event("startup")(_maybe_warm)
+    _app.on_event("shutdown")(_WARM_STOP.set)
 
 
 @app.get("/chat", include_in_schema=False)

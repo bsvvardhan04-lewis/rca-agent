@@ -41,6 +41,39 @@ TIMESTAMP = re.compile(r"\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z?\b")
 
 BRACKETED = re.compile(r"\[([A-Z]{1,2}\d{1,4})\]")
 
+# "two alerts", "3 pull requests", "five log lines" - a number followed, within a
+# couple of words, by something the ledger counts.
+NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+# Words that may not sit between the number and the noun. Without this,
+# "3 minutes before the alerts fired" reads as a claim of three alerts.
+_NOT_IN_GAP = r"(?:minutes?|seconds?|hours?|days?|ms|before|after|since|until|of|from|at|in|on|the|a|an)"
+COUNT_CLAIM = re.compile(
+    r"\b(\d{1,3}|" + "|".join(NUMBER_WORDS) + r")\s+"
+    r"(?:(?!" + _NOT_IN_GAP + r"\b)[A-Za-z-]+\s+){0,2}?"
+    r"(alerts?|pull requests?|prs?|code changes?|changes?|deployments?|log (?:lines?|entries))\b",
+    re.IGNORECASE,
+)
+# "another change", "a second pull request", "an additional alert": no number is
+# stated, but each asserts there are at least two (a "third": three).
+IMPLIED_MORE = re.compile(
+    r"\b(another|a second|a third|an additional|a further|one more)\s+(?:[A-Za-z-]+\s+)?"
+    r"(alerts?|pull requests?|prs?|code changes?|changes?|deployments?)\b",
+    re.IGNORECASE,
+)
+IMPLIED_MINIMUM = {"a third": 3}
+NEGATION = re.compile(r"\b(no|not|never|without|nor|neither)\b|n't", re.IGNORECASE)
+# What each noun is counted against in the evidence ledger (singular and plural).
+COUNT_KIND = {
+    "alert": "alert", "alerts": "alert",
+    "pull request": "change", "pull requests": "change", "pr": "change", "prs": "change",
+    "code change": "change", "code changes": "change", "change": "change", "changes": "change",
+    "deployment": "change", "deployments": "change",
+    "log line": "log", "log lines": "log", "log entry": "log", "log entries": "log",
+}
+
 # How much of the tail of the investigation log to show. The log is a trace of
 # tool calls; the last few are the ones that produced the conclusion.
 LOG_TAIL = 25
@@ -56,6 +89,7 @@ class ChatAnswer:
     citations: list[str] = field(default_factory=list)
     unresolved: list[str] = field(default_factory=list)
     unsupported_times: list[str] = field(default_factory=list)
+    unsupported_counts: list[str] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
 
 
@@ -236,11 +270,19 @@ class ReportChat:
                 "\n\n[Check: the time(s) " + ", ".join(wrong_times) + " do not appear in "
                 "the evidence cited above. Verify them before relying on this answer.]"
             )
+
+        wrong_counts = self.unsupported_counts(text)
+        if wrong_counts:
+            text += (
+                "\n\n[Check: " + "; ".join(wrong_counts) + ". "
+                "Verify before relying on this answer.]"
+            )
         return ChatAnswer(
             text=text,
             citations=cited,
             unresolved=unresolved,
             unsupported_times=wrong_times,
+            unsupported_counts=wrong_counts,
             usage=response.usage,
         )
 
@@ -306,6 +348,44 @@ class ReportChat:
             if stamp.rstrip("Z") not in have and stamp not in bad:
                 bad.append(stamp)
         return bad
+
+    def unsupported_counts(self, text: str) -> list[str]:
+        """Counts the answer states that exceed what the ledger holds.
+
+        Live, a 3B model asked "how many alerts fired?" answered "two" against a
+        ledger holding one, inventing the second from a pull request's deploy
+        time. The ledger is the whole of what was retrieved, so a claimed number
+        of alerts, changes or log lines above its count cannot be true of this
+        report. It only ever flags *over*-counting: an answer that says fewer
+        than the ledger holds may simply be about a subset.
+        """
+        have = {"alert": 0, "change": 0, "log": 0}
+        for item in self.report.evidence:
+            have[item.kind] += 1
+
+        problems: list[str] = []
+        for match in COUNT_CLAIM.finditer(text):
+            raw, noun = match.group(1).lower(), match.group(2).lower()
+            claimed = NUMBER_WORDS.get(raw) or int(raw)
+            kind = COUNT_KIND[noun]
+            if claimed > have[kind]:
+                problems.append(
+                    f"the report retrieved {have[kind]} {kind}(s), but the answer says "
+                    f"{match.group(1).lower()} {noun}"
+                )
+        for match in IMPLIED_MORE.finditer(text):
+            # "there was no additional change" is a correct answer, not a claim.
+            if NEGATION.search(text[max(0, match.start() - 20) : match.start()]):
+                continue
+            phrase, noun = match.group(1).lower(), match.group(2).lower()
+            implied = IMPLIED_MINIMUM.get(phrase, 2)
+            kind = COUNT_KIND[noun]
+            if implied > have[kind]:
+                problems.append(
+                    f"the report retrieved {have[kind]} {kind}(s), but the answer refers to "
+                    f"{phrase} {noun}"
+                )
+        return list(dict.fromkeys(problems))
 
     def resolve(self, ids: list[str]) -> list[dict[str, str]]:
         """Turn cited IDs back into the evidence lines they point at."""
