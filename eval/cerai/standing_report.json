@@ -1,0 +1,236 @@
+{
+ "incident": {
+  "id": "INC-1042",
+  "title": "Checkout failing for a chunk of customers - payments returning 500",
+  "description": "Support is getting a wave of tickets since roughly 20 minutes ago. Customers click Pay and get 'Something went wrong, please try again'. It is not everyone - some payments go through. Our own test card failed twice then succeeded on the third attempt. Checkout page itself loads fine. Nobody on the team knows of a planned change. Please find out what is going on.",
+  "reported_at": "2026-09-25T08:13:00Z",
+  "reporter": "nisha.support",
+  "service_hint": "checkout-web",
+  "severity_hint": "SEV2"
+ },
+ "triage": {
+  "summary": "Checkout failing for a chunk of customers, payments returning 500",
+  "affected_services": [
+   "checkout-web",
+   "ledger-service"
+  ],
+  "symptoms": [
+   "Payment failed with HTTP status code 500",
+   "Checkout page loads fine, but payment fails"
+  ],
+  "error_signatures": [
+   "500",
+   "Something went wrong, please try again"
+  ],
+  "search_keywords": [
+   "checkout-web",
+   "ledger-service",
+   "payment failure",
+   "HTTP 500"
+  ],
+  "window_start": "2026-09-25T05:13:00Z",
+  "window_end": "2026-09-25T08:13:00Z",
+  "severity": "SEV2",
+  "triage_notes": "Start window 3 hours before report time, prioritize checkout-web and ledger-service due to symptom locations"
+ },
+ "analysis": {
+  "headline": "Checkout failing for a chunk of customers due to merchant risk scoring issue",
+  "timeline": [
+   "2026-09-25T07:51:00Z - PR-4821 deployed: Add merchant risk scoring to payment authorization [C1]",
+   "2026-09-25T08:04:00Z - alert LedgerSettlementRetryRate fired on ledger-service (warning) [A1]",
+   "2026-09-25T08:11:45Z - ERROR payments-api: POST /v1/payments/authorize 500 in 5013ms (x3) [L15]",
+   "2026-09-25T08:12:00Z - WARN ledger-service: retrying settlement for payment_intent=pi_b89a52e5: upstream 500 from payments-api (attempt 1/5) [L13]",
+   "2026-09-25T08:12:04Z - ERROR payments-api: TimeoutError: connection pool exhausted (size=10, in_use=10, waited 5001ms) acquiring connection... (x2) [L12]",
+   "2026-09-25T08:12:36Z - WARN ledger-service: retrying settlement for payment_intent=pi_105ff0e2: upstream 500 from payments-api (attempt 2/5) [L3]"
+  ],
+  "hypotheses": [
+   {
+    "statement": "The merchant risk scoring added by PR-4821 is causing issues with payment authorization.",
+    "category": "code_change",
+    "confidence": 0.9,
+    "reasoning": "The recent change to the payments-api service, PR-4821, adds merchant risk scoring to payment authorization. This could potentially cause issues if the risk scoring is not accurate or if the scoring process is not properly handled. The evidence shows a spike in errors around 8:12:24 AM, which aligns with the deployment of PR-4821.",
+    "supporting_evidence": [
+     "L3",
+     "L6",
+     "L11",
+     "L12",
+     "L15",
+     "C1"
+    ],
+    "contradicting_evidence": [],
+    "suspect_change": "PR-4821",
+    "verification_steps": [
+     "Check the risk scoring process in the payments-api service",
+     "Verify that the merchant risk scoring is accurate and properly handled",
+     "Roll back the deployment of PR-4821 if necessary"
+    ]
+   },
+   {
+    "statement": "The connection pool exhaustion in the payments-api service is causing issues with payment authorization.",
+    "category": "resource_exhaustion",
+    "confidence": 0.5,
+    "reasoning": "The evidence shows a spike in errors around 8:12:24 AM, which could be related to the connection pool exhaustion in the payments-api service. However, this hypothesis is less likely than the first one, as the risk scoring issue seems to be more directly related to the deployment of PR-4821.",
+    "supporting_evidence": [
+     "L7",
+     "L11",
+     "L12"
+    ],
+    "contradicting_evidence": [
+     "L3",
+     "L6"
+    ],
+    "suspect_change": "",
+    "verification_steps": [
+     "Check the connection pool size and usage in the payments-api service",
+     "Verify that the connection pool exhaustion is not related to the risk scoring issue"
+    ]
+   }
+  ],
+  "blast_radius": "payments-api service",
+  "immediate_actions": [
+   "Roll back the deployment of PR-4821 if necessary",
+   "Check the risk scoring process in the payments-api service",
+   "Verify that the connection pool exhaustion is not related to the risk scoring issue"
+  ],
+  "evidence_gaps": [
+   "What is the current risk scoring process in the payments-api service?",
+   "How does the risk scoring process interact with the connection pool?"
+  ]
+ },
+ "evidence": [
+  {
+   "id": "L1",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:54.998000Z",
+   "summary": "2026-09-25T08:12:54Z INFO  [ledger-service] trace=af433899dd228df0 POST /v1/payments/authorize 200 in 154.9ms",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L2",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:47.951000Z",
+   "summary": "2026-09-25T08:12:47Z INFO  [ledger-service] trace=885fe83a490158aa GET /healthz 200 in 137.8ms",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L3",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:36Z",
+   "summary": "2026-09-25T08:12:36Z WARN  [ledger-service] trace=bdd8cd4582c0850e retrying settlement for payment_intent=pi_105ff0e2: upstream 500 from payments-api (attempt 2/5)",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L4",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:34.460000Z",
+   "summary": "2026-09-25T08:12:34Z INFO  [ledger-service] trace=3c109eb4579a1338 POST /v1/payments/capture 200 in 52.6ms",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L5",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:31.011000Z",
+   "summary": "2026-09-25T08:12:31Z INFO  [payments-api] trace=db35dbd5c451f10c POST /v1/payments/authorize 200 in 57.2ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L6",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:24.012000Z",
+   "summary": "2026-09-25T08:12:24Z ERROR [payments-api] trace=903e167036102412 POST /v1/payments/authorize 500 in 5013ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L7",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:24Z",
+   "summary": "2026-09-25T08:12:24Z ERROR [payments-api] trace=903e167036102412 TimeoutError: connection pool exhausted (size=10, in_use=10, waited 5001ms) acquiring connection for tx_authorize",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L8",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:22.135000Z",
+   "summary": "2026-09-25T08:12:22Z INFO  [ledger-service] trace=71a521eb90fea41b GET /v1/payments/{id} 200 in 48.1ms",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L9",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:22.032000Z",
+   "summary": "2026-09-25T08:12:22Z INFO  [ledger-service] trace=7558387d9d389a8e GET /v1/payments/{id} 200 in 119.4ms",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L10",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:13.726000Z",
+   "summary": "2026-09-25T08:12:13Z INFO  [payments-api] trace=a7935f4e50467a74 GET /healthz 200 in 71.5ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L11",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:04.812000Z",
+   "summary": "2026-09-25T08:12:04Z ERROR [payments-api] trace=d1d28bbff169a3e3 POST /v1/payments/authorize 500 in 5013ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L12",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:04.800000Z",
+   "summary": "2026-09-25T08:12:04Z ERROR [payments-api] trace=d1d28bbff169a3e3 TimeoutError: connection pool exhausted (size=10, in_use=10, waited 5001ms) acquiring connection for tx_authorize",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L13",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:12:00Z",
+   "summary": "2026-09-25T08:12:00Z WARN  [ledger-service] trace=6c0a404d6e2f883a retrying settlement for payment_intent=pi_b89a52e5: upstream 500 from payments-api (attempt 1/5)",
+   "source": "logs/ledger-service"
+  },
+  {
+   "id": "L14",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:11:59.121000Z",
+   "summary": "2026-09-25T08:11:59Z INFO  [payments-api] trace=b23aa08df8d4d7f5 GET /v1/payments/{id} 200 in 62.7ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "L15",
+   "kind": "log",
+   "timestamp": "2026-09-25T08:11:45.612000Z",
+   "summary": "2026-09-25T08:11:45Z ERROR [payments-api] trace=3a59e9709801e392 POST /v1/payments/authorize 500 in 5013ms",
+   "source": "logs/payments-api"
+  },
+  {
+   "id": "C1",
+   "kind": "change",
+   "timestamp": "2026-09-25T07:51:00Z",
+   "summary": "PR-4821 'Add merchant risk scoring to payment authorization' by priya.nair merged=2026-09-25T07:18:00Z deployed=2026-09-25T07:51:00Z services=payments-api (+287/-41, 3 files)",
+   "source": "https://github.example.com/acme/platform/pull/4821"
+  },
+  {
+   "id": "A1",
+   "kind": "alert",
+   "timestamp": "2026-09-25T08:04:00Z",
+   "summary": "A-9019 [warning] LedgerSettlementRetryRate on ledger-service 2026-09-25T08:04:00Z -> ONGOING value=22.0 threshold=5.0",
+   "source": "monitoring"
+  }
+ ],
+ "investigation_log": [
+  "log_volume(query='', services='', levels='', bucket=5m)",
+  "search_logs(query='', services='', levels='', limit=15)",
+  "list_alerts(services='checkout-web,ledger-service', window=2026-09-25T05:13:00Z..2026-09-25T08:13:00Z)",
+  "get_change_detail('PR-4821')"
+ ],
+ "model": "llama3.2:3b",
+ "generated_at": "2026-10-19T07:01:26.943118Z",
+ "usage": {
+  "input_tokens": 8872,
+  "output_tokens": 1583,
+  "cache_read_input_tokens": 0,
+  "cache_creation_input_tokens": 0
+ },
+ "duration_seconds": 541.0
+}
